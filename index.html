@@ -150,6 +150,11 @@
 
   .empty { color: var(--bc-muted); font-size: 14px; padding: 26px 16px; text-align: center; }
   .spinner { padding: 26px 16px; text-align: center; color: var(--bc-muted); }
+  .af-spin { display: inline-block; width: 18px; height: 18px; vertical-align: middle;
+    margin-right: 9px; border: 2.5px solid var(--bc-border); border-top-color: var(--bc-primary);
+    border-radius: 50%; animation: af-rot .7s linear infinite; }
+  .af-spin.sm { width: 12px; height: 12px; border-width: 2px; margin-right: 6px; }
+  @keyframes af-rot { to { transform: rotate(360deg); } }
 
   table.kv { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   table.kv td { padding: 7px 14px; vertical-align: top; border-top: 1px solid #f0f1f6; }
@@ -299,6 +304,11 @@
 <main id="viewKunden" style="display:none">
   <div class="custfilters" style="margin-bottom:8px">
     <input type="text" id="custFilter" placeholder="Name…" autocomplete="off">
+    <select id="fKind">
+      <option value="">Alle</option>
+      <option value="entity">Unternehmen</option>
+      <option value="person">Personen</option>
+    </select>
     <select id="fKyc"><option value="">KYC-Status: alle</option></select>
     <select id="fInd"><option value="">Branchen-Risiko: alle</option></select>
     <select id="fCtry"><option value="">Länder-Risiko: alle</option></select>
@@ -367,7 +377,7 @@ document.querySelectorAll(".topnav-btn").forEach(b => {
 });
 $("#custReload").addEventListener("click", loadCustomerList);
 $("#custFilter").addEventListener("input", filterCustomers);
-["fKyc", "fReKYC", "fScreening", "fInd", "fCtry", "fAml"].forEach(id =>
+["fKind", "fKyc", "fReKYC", "fScreening", "fInd", "fCtry", "fAml"].forEach(id =>
   $("#" + id).addEventListener("change", filterCustomers));
 
 function uniq(a) { return [...new Set(a.filter(Boolean))].sort(); }
@@ -389,7 +399,7 @@ function populateFilters(rows) {
 // Process data (ReKYC + Screening status per customer) loads automatically in the
 // background after the table renders; the process/status filters enable when ready.
 async function loadProcessData() {
-  $("#procNote").textContent = "Prozessdaten werden geladen…";
+  $("#procNote").innerHTML = '<span class="af-spin sm"></span>Prozessdaten werden geladen…';
   try {
     const res = await fetch("/api/customer-processes", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
@@ -421,7 +431,7 @@ function resetProcFilters() {
 
 async function loadCustomerList() {
   resetProcFilters();
-  $("#custBody").innerHTML = `<tr><td colspan="8" class="wf-msg">Lade Mandanten…</td></tr>`;
+  $("#custBody").innerHTML = `<tr><td colspan="8" class="wf-msg"><span class="af-spin"></span>Lade Mandanten…</td></tr>`;
   $("#custCount").textContent = "";
   try {
     const res = await fetch("/api/customers-list", {
@@ -464,7 +474,7 @@ function renderCustomers(rows) {
           : '<span class="muted">—</span>'}</td>
       <td>${tcell(r.kycStatus)}</td>
       <td class="wz">${r.wzCode
-          ? `<span class="cell-clip" title="${esc(r.wzCode)}">${esc(r.wzCode)}</span>`
+          ? `<span class="cell-clip" title="${esc(r.wzDescription || r.wzCode)}">${esc(r.wzCode)}</span>`
           : '<span class="muted">—</span>'}</td>
       <td>${tcell(r.taxIndustry)}</td>
       <td>${rcell(r.industryRisk)}</td>
@@ -490,6 +500,7 @@ function renderPager(total, pages, start, shown) {
 function filterCustomers() {
   custPage = 1;
   const q = $("#custFilter").value.toLowerCase();
+  const kind = $("#fKind").value;   // "" | entity | person
   const kyc = $("#fKyc").value;
   const reStat = $("#fReKYC").value, scStat = $("#fScreening").value;
   const ind = $("#fInd").value, ctry = $("#fCtry").value, aml = $("#fAml").value;
@@ -499,6 +510,11 @@ function filterCustomers() {
     procFam(p).includes(fam) && String(p.status || "").toUpperCase() === status);
   renderCustomers(custRows.filter(r => {
     if (q && !(r.name || "").toLowerCase().includes(q)) return false;
+    if (kind) {   // INDIVIDUAL = Person, anything else = Unternehmen
+      const isPerson = String(r.type || "").toUpperCase() === "INDIVIDUAL";
+      if (kind === "person" && !isPerson) return false;
+      if (kind === "entity" && isPerson) return false;
+    }
     if (kyc && r.kycStatus !== kyc) return false;
     if (ind && r.industryRisk !== ind) return false;
     if (ctry && r.countryRisk !== ctry) return false;
@@ -514,7 +530,7 @@ $("#searchForm").addEventListener("submit", async (e) => {
   const q = $("#q").value.trim();
   const domain = $("#domain").value;
   if (!q) return;
-  $("#results").innerHTML = '<div class="spinner">Suche läuft…</div>';
+  $("#results").innerHTML = '<div class="spinner"><span class="af-spin"></span>Suche läuft…</div>';
   $("#detail").innerHTML = '<div class="empty">Treffer links auswählen.</div>';
   $("#count").style.display = "none";
   try {

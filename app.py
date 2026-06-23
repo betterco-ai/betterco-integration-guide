@@ -47,6 +47,38 @@ ENV_FIELDS = [
     ("BETTERCO_USER_PASSWORD", "User Passwort",    True,  ""),
 ]
 SECRET_MASK = "••••••••"   # shown for a stored secret
+
+# WZ 2008 (Klassifikation der Wirtschaftszweige) code -> Bezeichnung, keyed by the
+# numeric code without the leading section letter (e.g. "70.10.1"). Sourced from the
+# Destatis WZ 2008 list. Used to describe a customer's segmentCodes.wz on hover.
+try:
+    WZ2008 = json.loads((HERE / "wz2008.json").read_text(encoding="utf-8"))
+except Exception:  # noqa: BLE001
+    WZ2008 = {}
+
+
+def _wz_lookup(code: str) -> str | None:
+    """Resolve one WZ code to its Bezeichnung, falling back to broader levels
+    (subclass -> class -> group -> division) when the exact code isn't listed."""
+    parts = code.split(".")
+    for i in range(len(parts), 0, -1):
+        hit = WZ2008.get(".".join(parts[:i]))
+        if hit:
+            return hit
+    return None
+
+
+def _wz_describe(wz: str) -> str:
+    """A multi-line "code — Bezeichnung" description for a (possibly comma-joined)
+    WZ string, for the WZ-Code hover. Codes with no match are shown bare."""
+    out = []
+    for raw in str(wz or "").split(","):
+        code = raw.strip()
+        if not code:
+            continue
+        desc = _wz_lookup(code)
+        out.append(f"{code} — {desc}" if desc else code)
+    return "\n".join(out)
 ENV_HEADER = (
     "# BetterCo workspace credentials — written by the in-app Zugangsdaten editor.\n"
     "# REST (key+secret) drives customer/case/process/document calls; the User-API\n"
@@ -121,6 +153,7 @@ def _risk_fields_rest(cu: dict) -> dict:
         "pruefnotiz": f("kycNote"),
         "kycStatus": f("kycStatus"),
         "wzCode": wz,
+        "wzDescription": _wz_describe(wz),
         "taxIndustry": f("taxIndustry"),
         "industryRisk": f("taxIndustryRisk"),
         "countryRisk": f("riskCountry"),
@@ -499,7 +532,9 @@ class Handler(BaseHTTPRequestHandler):
                 return {
                     "id": cid,
                     "name": (cu.get("legalInfo") or {}).get("legalName") or dn,
+                    "type": cu.get("type"),   # INDIVIDUAL = Person, else Unternehmen
                     "kycStatus": f["kycStatus"], "wzCode": f["wzCode"],
+                    "wzDescription": f["wzDescription"],
                     "taxIndustry": f["taxIndustry"], "industryRisk": f["industryRisk"],
                     "countryRisk": f["countryRisk"], "amlRisk": f["amlRisk"],
                     "pruefnotiz": f["pruefnotiz"],
