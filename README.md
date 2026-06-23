@@ -45,6 +45,13 @@ cp workspaces/example.env workspaces/editor-betterco-claude.env
 # edit it: BETTERCO_API_KEY/SECRET, WORKSPACE_ID, ORG_ID, USER_EMAIL/PASSWORD
 ```
 
+Or skip the manual copy: start the app and use the **Zugangsdaten** tab to enter the
+credentials in the browser — it writes the `.env`, runs `verify_env()`, and (if OK)
+swaps in the live client without a restart. The app boots even with no/invalid env so
+you can set one up from there. Stored secrets are masked on reload (leave them blank to
+keep). REST key+secret cover the customer/case/process/document calls; User-API
+email+password are needed for registry search (step 1) and enriched "Akte anlegen" (step 3).
+
 > The app needs **both** REST (key+secret) and User-API (email+password) credentials:
 > REST for customer/case/process/document reads & writes, the User-API registry path
 > only for the enriched NorthData/company.info customer creation in step 3.
@@ -76,6 +83,7 @@ Windows: double-click `run_widget.bat`. Opens http://localhost:8770.
 
 | Endpoint | Purpose |
 |---|---|
+| `GET /api/env` / `POST /api/env` | read/write workspace credentials (Zugangsdaten editor; secrets masked) |
 | `GET /api/search` | registry search (step 1) |
 | `POST /api/create-matter` | enriched client + matter + flows + share link (step 3) |
 | `POST /api/processes` | flows of a matter (name, status, progress, shareable) |

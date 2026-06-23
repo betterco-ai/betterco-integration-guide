@@ -25,10 +25,34 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+from betterco_client import BetterCoClient
 from reference_flow import connect, _as_list, _parse_env_file
 
 HERE = Path(__file__).parent
 HTML_FILE = HERE / "index.html"
+WORKSPACES_DIR = HERE / "workspaces"
+
+# Credential fields captured by the in-app Zugangsdaten editor, in file order:
+# (key, label, secret, default). REST (key+secret) drives the customer/case/
+# process/document calls; the User-API (email+password) is required for registry
+# search (step 1) and the enriched "Akte anlegen" (step 3). secret=True fields are
+# masked on read and only overwritten when the user actually changes them.
+ENV_FIELDS = [
+    ("BETTERCO_BASE_URL",      "Base URL",        False, "https://editor.betterco.ai/bcapi"),
+    ("BETTERCO_API_KEY",       "REST API Key",    False, ""),
+    ("BETTERCO_API_SECRET",    "REST API Secret", True,  ""),
+    ("BETTERCO_WORKSPACE_ID",  "Workspace ID",    False, ""),
+    ("BETTERCO_ORG_ID",        "Advisor Org ID",  False, ""),
+    ("BETTERCO_USER_EMAIL",    "User E-Mail",      False, ""),
+    ("BETTERCO_USER_PASSWORD", "User Passwort",    True,  ""),
+]
+SECRET_MASK = "••••••••"   # shown for a stored secret
+ENV_HEADER = (
+    "# BetterCo workspace credentials — written by the in-app Zugangsdaten editor.\n"
+    "# REST (key+secret) drives customer/case/process/document calls; the User-API\n"
+    "# (email+password) is required for registry search and the enriched 'Akte anlegen'.\n"
+    "# Contains secrets and is git-ignored — never commit a real .env.\n\n"
+)
 
 # Flow sets added to the matter on "Akte anlegen" (step 3), by domain.
 ENTITY_FLOWS = ["F1800_OnboardingEntity_A", "F1800_OnboardingEntity_E",
@@ -38,7 +62,35 @@ PERSON_FLOWS = ["F1900_OnboardingIndividual_A", "F1900_OnboardingIndividual_E",
 
 _client = None          # set in main()
 _org_id = None          # advisor org id (from the workspace env) — set in main()
+_env_file = None        # path of the active workspace .env — set in main()/on save
+_status = {}            # last verify_env() report (for the Zugangsdaten status line)
 _client_lock = threading.Lock()
+
+
+def _safe_env_path(name: str) -> Path:
+    """Resolve a user-supplied env name to workspaces/<base>.env (no traversal)."""
+    base = Path(name or "").name           # strip any directory part
+    if not base.endswith(".env"):
+        base += ".env"
+    return WORKSPACES_DIR / base
+
+
+def _build_client(values: dict) -> BetterCoClient:
+    """Construct a client from explicit env values (same wiring as connect())."""
+    return BetterCoClient(
+        base_url=values.get("BETTERCO_BASE_URL"),
+        api_key=values.get("BETTERCO_API_KEY"),
+        api_secret=values.get("BETTERCO_API_SECRET"),
+        workspace_id=values.get("BETTERCO_WORKSPACE_ID"),
+        org_id=values.get("BETTERCO_ORG_ID"),
+        user_email=values.get("BETTERCO_USER_EMAIL"),
+        user_password=values.get("BETTERCO_USER_PASSWORD"),
+    )
+
+
+def _write_env_file(path: Path, values: dict) -> None:
+    body = ENV_HEADER + "".join(f"{k}={values.get(k, '')}\n" for k, *_ in ENV_FIELDS)
+    path.write_text(body, encoding="utf-8")
 
 
 def _first(*vals):
@@ -119,6 +171,8 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
             return self._send_html()
+        if parsed.path == "/api/env":
+            return self._handle_env_get(parse_qs(parsed.query))
         if parsed.path == "/api/search":
             return self._handle_search(parse_qs(parsed.query))
         if parsed.path == "/api/document":
@@ -238,6 +292,8 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
         except Exception:
             return self._send_json({"error": "invalid JSON body"}, 400)
+        if parsed.path == "/api/env":
+            return self._handle_env_save(body)
         if parsed.path == "/api/create-matter":
             return self._handle_create_matter(body)
         if parsed.path == "/api/process-link":
@@ -259,6 +315,87 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/customer-processes":
             return self._handle_customer_processes(body)
         self._send_json({"error": "not found"}, 404)
+
+    # ── Zugangsdaten (workspace .env credential editor) ──────────────
+    def _handle_env_get(self, qs: dict):
+        """List workspace .env files and return one file's values (secrets masked).
+
+        Secret fields (API_SECRET, USER_PASSWORD) never leave the server in clear —
+        a stored secret reads back as SECRET_MASK; an unset one as "". For a brand-new
+        (non-existent) file the non-secret defaults (e.g. Base URL) are prefilled.
+        """
+        active = Path(_env_file).name if _env_file else None
+        requested = (qs.get("file") or [""])[0].strip()
+        target = Path(requested).name if requested else active
+        files = sorted(p.name for p in WORKSPACES_DIR.glob("*.env"))
+        parsed = {}
+        if target:
+            path = WORKSPACES_DIR / target
+            if path.exists():
+                parsed = _parse_env_file(str(path))
+        is_new = bool(target) and not parsed
+        values, is_set = {}, {}
+        for key, _label, secret, default in ENV_FIELDS:
+            stored = parsed.get(key, "")
+            is_set[key] = bool(stored)
+            if secret and stored:
+                values[key] = SECRET_MASK
+            elif stored:
+                values[key] = stored
+            elif is_new and default:        # new file: prefill sensible defaults
+                values[key] = default
+            else:
+                values[key] = ""
+        return self._send_json({
+            "files": files, "active": active, "file": target,
+            "fields": [{"key": k, "label": l, "secret": s} for k, l, s, _ in ENV_FIELDS],
+            "values": values, "isSet": is_set, "mask": SECRET_MASK, "status": _status,
+        })
+
+    def _handle_env_save(self, body: dict):
+        """Write a workspace .env and, by default, activate it as the live client.
+
+        An unchanged masked secret (== SECRET_MASK) keeps the value already on disk.
+        Activation runs verify_env() and only swaps the global client if it reports ok;
+        otherwise the file is still written but the running client is left untouched.
+        """
+        global _client, _org_id, _env_file, _status
+        fname = (body.get("file") or "").strip()
+        if not fname:
+            return self._send_json({"error": "Dateiname erforderlich"}, 400)
+        values_in = body.get("values") or {}
+        activate = body.get("activate", True)
+        path = _safe_env_path(fname)
+        existing = _parse_env_file(str(path)) if path.exists() else {}
+        out = {}
+        for key, _label, secret, _default in ENV_FIELDS:
+            v = (values_in.get(key) or "").strip()
+            if secret and v == SECRET_MASK:        # unchanged masked secret -> keep stored
+                v = existing.get(key, "")
+            out[key] = v
+        try:
+            _write_env_file(path, out)
+        except Exception as exc:  # noqa: BLE001
+            return self._send_json({"error": f"Schreiben fehlgeschlagen: {exc}"}, 500)
+        resp = {"saved": path.name, "activated": False}
+        if activate:
+            rep, client = {}, None
+            try:
+                client = _build_client(out)
+                rep = client.verify_env()
+            except Exception as exc:  # noqa: BLE001
+                resp["error"] = f"Verbindung fehlgeschlagen: {exc}"
+            resp["status"] = rep
+            if rep.get("ok"):
+                with _client_lock:
+                    _client = client
+                    _org_id = out.get("BETTERCO_ORG_ID")
+                    _env_file = str(path)
+                    _status = rep
+                resp["activated"] = True
+            elif "error" not in resp:
+                resp["error"] = "Gespeichert, aber Verbindung nicht ok — siehe Status."
+        return self._send_json(resp)
 
     def _handle_customer_processes(self, body: dict):
         """Process map {cid: [{flow,label,status}]} for the overview process filter.
@@ -597,7 +734,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    global _client, _org_id
+    global _client, _org_id, _env_file, _status
     ap = argparse.ArgumentParser(description="BetterCo PoC search widget server")
     ap.add_argument("--env-file", default="workspaces/editor-betterco-claude.env",
                     help="Workspace .env to authenticate with")
@@ -605,8 +742,17 @@ def main() -> None:
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 
-    _org_id = _parse_env_file(args.env_file).get("BETTERCO_ORG_ID")
-    _client = connect(args.env_file)
+    _env_file = args.env_file
+    # Don't hard-fail on a missing/invalid env: boot anyway so the Zugangsdaten
+    # editor can capture credentials for a fresh workspace. API calls return errors
+    # until a valid env is saved (which swaps in the live client).
+    try:
+        _org_id = _parse_env_file(args.env_file).get("BETTERCO_ORG_ID")
+        _client = connect(args.env_file)
+        _status = _client.verify_env()
+    except (SystemExit, Exception) as exc:  # noqa: BLE001
+        print(f"!! Env '{args.env_file}' not ready ({exc}). "
+              f"Open the app and set credentials under 'Zugangsdaten'.")
     url = f"http://localhost:{args.port}"
     print(f"BetterCo PoC search widget -> {url}  (env: {args.env_file})")
     if not args.no_browser:
