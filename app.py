@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-PoC search widget — local HTML page with an integrated BetterCo company search.
+BetterCo integration guide — local web app driving the Mandanten-Neuannahme flow.
 
-Front end for steps 1-2 of the Mandanten-Neuannahme flow:
-  1) Unternehmenssuche      -> GET /api/search?q=...&domain=ENTITY  (search_registry)
-  2) Stammdaten validieren  -> the selected hit's master data is shown for confirmation
+A single HTML page (index.html) backed by this stdlib http.server, which holds the
+authenticated BetterCo client and proxies every call (the browser never talks to
+BetterCo directly). See README.md for the full flow and HTTP_REFERENCE.md for the
+raw HTTP behind each step.
 
-Zero external deps (stdlib http.server), same pattern as screening_review_app.py.
-The BetterCo registry search needs User-API auth, so the browser never talks to
-BetterCo directly — this backend holds the authenticated client and proxies search.
-
-    python poc_search_app.py                                  # editor-betterco-claude, :8770
-    python poc_search_app.py --env-file workspaces/prod-eckhard-afileon.env
-    python poc_search_app.py --port 8771 --no-browser
+    python app.py                                  # default env, :8770
+    python app.py --env-file workspaces/prod-eckhard-afileon.env
+    python app.py --port 8771 --no-browser
 """
 from __future__ import annotations
 
@@ -28,10 +25,10 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-from poc_mandant_neuannahme import connect, _as_list, _parse_env_file
+from reference_flow import connect, _as_list, _parse_env_file
 
 HERE = Path(__file__).parent
-HTML_FILE = HERE / "poc_search.html"
+HTML_FILE = HERE / "index.html"
 
 # Flow sets added to the matter on "Akte anlegen" (step 3), by domain.
 ENTITY_FLOWS = ["F1800_OnboardingEntity_A", "F1800_OnboardingEntity_E",

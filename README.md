@@ -1,13 +1,18 @@
-# Mandanten-Neuannahme — BetterCo PoC
+# BetterCo Integration Guide
 
-A small, self-contained web app that drives the BetterCo KYC onboarding flow
-("Mandanten-Neuannahme") end to end: search a company, create the client + matter
-with the onboarding/ReKYC/screening flows, run the workflows in an embedded runner,
-and review customer data, documents and the risk profile.
+A small, self-contained reference app that drives the BetterCo KYC onboarding flow
+("Mandanten-Neuannahme") end to end — and serves as a **working example** of how to
+integrate against the BetterCo REST + User APIs.
 
-Zero front-end framework — a single HTML page backed by a stdlib `http.server`
-that holds the authenticated BetterCo client and proxies every call (the browser
-never talks to BetterCo directly).
+Search a company, create the client + matter with the onboarding / ReKYC / screening
+flows, run the workflows in an embedded runner, and review customer data, documents
+and the risk profile. Plus a workspace customer overview with KYC/risk columns and
+filters.
+
+Zero front-end framework — a single HTML page (`index.html`) backed by a stdlib
+`http.server` (`app.py`) that holds the authenticated BetterCo client and proxies
+every call. **The browser never talks to BetterCo directly** (credentials stay on the
+server; auth, CORS and token refresh are handled in one place).
 
 ## The flow
 
@@ -20,12 +25,12 @@ never talks to BetterCo directly).
 4. **Workflows** — per-flow **initiator-side** runner embedded in an iframe
    (non-shareable flows like screening show a read-only task view)
 5. **Daten & Dokumente** — Mandanten-Daten / Mandanten-Dokumente / Prozess-Dokumente
-   (with "Alle als ZIP") / Risiko-Profil / Process Status
+   (each with "Alle als ZIP") / Risiko-Profil / Process Status
 6. **Mandanten-Übersicht** — workspace customer table with KYC/risk columns and
    filters (name, Prozess ReKYC/Screening, Status, Branchen-/Länder-/AML-Risiko)
 
-See `POC_MANDANT_NEUANNAHME_HTTP.md` for the raw HTTP behind every step, and
-`poc_mandant_neuannahme.py` for a scripted 9-step reference of the same flow.
+See **`HTTP_REFERENCE.md`** for the raw HTTP behind every step, and **`reference_flow.py`**
+for a scripted 9-step reference of the same flow (runnable from the CLI).
 
 ## Setup
 
@@ -43,16 +48,29 @@ cp workspaces/example.env workspaces/editor-betterco-claude.env
 > The app needs **both** REST (key+secret) and User-API (email+password) credentials:
 > REST for customer/case/process/document reads & writes, the User-API registry path
 > only for the enriched NorthData/company.info customer creation in step 3.
+> Run `BetterCoClient().verify_env()` (or just start the app) to confirm the env —
+> a wrong `BETTERCO_ORG_ID` is silent and lands data under the wrong advisor org.
 
 ## Run
 
 ```bash
-python poc_search_app.py                  # default env: workspaces/editor-betterco-claude.env, :8770
-python poc_search_app.py --env-file workspaces/<other>.env
-python poc_search_app.py --port 8771 --no-browser
+python app.py                       # default env: workspaces/editor-betterco-claude.env, :8770
+python app.py --env-file workspaces/<other>.env
+python app.py --port 8771 --no-browser
 ```
 
 Windows: double-click `run_widget.bat`. Opens http://localhost:8770.
+
+## Files
+
+| File | What |
+|---|---|
+| `app.py` | http.server backend — all endpoints (see table below) |
+| `index.html` | single-page UI |
+| `reference_flow.py` | scripted 9-step flow + the `connect()` / env helpers `app.py` imports |
+| `HTTP_REFERENCE.md` | raw HTTP request/response per step |
+| `betterco_client.py` | **vendored** BetterCo API client (snapshot — see Development) |
+| `workspaces/` | per-workspace `.env` files (git-ignored; `example.env` is the template) |
 
 ## HTTP endpoints (backend → BetterCo)
 
@@ -70,11 +88,17 @@ Windows: double-click `run_widget.bat`. Opens http://localhost:8770.
 | `POST /api/customers-list` | workspace overview (risk columns) |
 | `POST /api/customer-processes` | ReKYC + Screening status per customer (filter) |
 
-## Notes
+## Development
 
-- **`betterco_client.py` is vendored** here as a snapshot. The source of truth is the
-  `betterco_claude_api` repo / the `betterco` skill — re-copy it to pick up client updates.
-- The embedded runner loads `editor.betterco.ai` (cross-origin), so it can't be styled
-  from this page; the app wraps it in Afileon-colored chrome. To theme the runner itself,
-  use the BetterCo workspace portal CSS skin.
-- Workspace env files contain secrets and are git-ignored.
+**This repo is the home of the app** — make UI/backend changes to `app.py` /
+`index.html` / `reference_flow.py` **here** and run it from here.
+
+**`betterco_client.py` is vendored** as a snapshot. Its source of truth is the
+`betterco_claude_api` repo (a.k.a. the `betterco` skill); when the client changes there,
+re-copy `betterco_client.py` into this repo to pick up the update.
+
+The embedded runner loads `editor.betterco.ai` (cross-origin), so it can't be styled
+from this page; the app wraps it in Afileon-colored chrome. To theme the runner itself,
+use the BetterCo workspace portal CSS skin.
+
+Workspace env files contain secrets and are git-ignored — never commit a real `.env`.

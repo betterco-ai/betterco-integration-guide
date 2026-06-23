@@ -1,8 +1,8 @@
 @echo off
-title Mandanten-Neuannahme Widget :8770
+title BetterCo Integration Guide :8770
 color 1F
 echo ============================================
-echo   Mandanten-Neuannahme PoC  -  Suchwidget
+echo   BetterCo Integration Guide  -  Suchwidget
 echo ============================================
 echo.
 
@@ -14,6 +14,6 @@ set "PYTHONIOENCODING=utf-8"
 set "PYTHONUTF8=1"
 
 rem Pass a workspace env via --env-file, default is workspaces/editor-betterco-claude.env
-python "%~dp0poc_search_app.py" --port 8770 %*
+python "%~dp0app.py" --port 8770 %*
 
 pause
