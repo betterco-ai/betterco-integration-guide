@@ -8,13 +8,14 @@ BetterCo directly). See README.md for the full flow and HTTP_REFERENCE.md for th
 raw HTTP behind each step.
 
     python app.py                                  # default env, :8770
-    python app.py --env-file workspaces/prod-eckhard-afileon.env
+    python app.py --env-file workspaces/prod.env
     python app.py --port 8771 --no-browser
 """
 from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import threading
 import time
 import webbrowser
@@ -31,6 +32,7 @@ from reference_flow import connect, _as_list, _parse_env_file
 HERE = Path(__file__).parent
 HTML_FILE = HERE / "index.html"
 WORKSPACES_DIR = HERE / "workspaces"
+mimetypes.add_type("image/svg+xml", ".svg")   # not always registered on Windows
 
 # Credential fields captured by the in-app Zugangsdaten editor, in file order:
 # (key, label, secret, default). REST (key+secret) drives the customer/case/
@@ -200,10 +202,31 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_static(self, url_path: str):
+        """Serve a file from the app's assets/ folder (e.g. the header logo).
+
+        Confined to HERE/assets — any path that resolves outside it is refused.
+        """
+        target = (HERE / url_path.lstrip("/")).resolve()
+        assets = (HERE / "assets").resolve()
+        if assets != target and assets not in target.parents:
+            return self._send_json({"error": "forbidden"}, 403)
+        if not target.is_file():
+            return self._send_json({"error": "not found"}, 404)
+        ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        data = target.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
             return self._send_html()
+        if parsed.path.startswith("/assets/"):
+            return self._serve_static(parsed.path)
         if parsed.path == "/api/env":
             return self._handle_env_get(parse_qs(parsed.query))
         if parsed.path == "/api/search":

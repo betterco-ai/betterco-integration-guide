@@ -106,7 +106,7 @@ Windows: double-click `run_widget.bat`. Opens http://localhost:8770.
 re-copy `betterco_client.py` into this repo to pick up the update.
 
 The embedded runner loads `editor.betterco.ai` (cross-origin), so it can't be styled
-from this page; the app wraps it in Afileon-colored chrome. To theme the runner itself,
+from this page; the app wraps it in accent-colored chrome. To theme the runner itself,
 use the BetterCo workspace portal CSS skin.
 
 Workspace env files contain secrets and are git-ignored — never commit a real `.env`.
