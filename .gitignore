@@ -1,0 +1,16 @@
+# Secrets — workspace env files (contain API keys + passwords)
+.env
+workspaces/*.env
+!workspaces/example.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Outputs / scratch
+outputs/
+*.zip
+*.log

@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BetterCo · Unternehmenssuche</title>
+<style>
+  :root {
+    --bc-primary: #FF9600;        /* Afileon orange */
+    --bc-primary-dark: #d97c00;
+    --bc-tint: #fff6ea;           /* light orange wash */
+    --bc-bg: #f6f6f4;
+    --bc-card: #ffffff;
+    --bc-border: #e6e6e2;
+    --bc-text: #1d1d1b;
+    --bc-muted: #6b6b66;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    background: var(--bc-bg); color: var(--bc-text);
+  }
+  header {
+    background: #fff; border-bottom: 3px solid var(--bc-primary);
+    color: var(--bc-text); padding: 16px 28px; display: flex; align-items: center; gap: 16px;
+  }
+  header .logo { height: 30px; width: auto; display: block; }
+  header .divider { width: 1px; height: 26px; background: var(--bc-border); }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; color: var(--bc-text); }
+  header .step {
+    margin-left: auto; font-size: 12px; font-weight: 600; color: var(--bc-primary-dark);
+    background: var(--bc-tint); padding: 5px 11px; border-radius: 999px;
+  }
+  main { max-width: 1100px; margin: 26px auto; padding: 0 22px; }
+
+  .topnav { max-width: 1100px; margin: 18px auto 0; padding: 0 22px; display: flex; gap: 8px;
+    border-bottom: 1px solid var(--bc-border); }
+  .topnav-btn {
+    padding: 10px 18px; font-size: 14px; font-weight: 600; border: 0; background: none;
+    color: var(--bc-muted); cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -1px;
+  }
+  .topnav-btn:hover { color: var(--bc-text); }
+  .topnav-btn.active { color: var(--bc-text); border-bottom-color: var(--bc-primary); }
+
+  .custfilters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; align-items: center; }
+  .custfilters input[type=text] { flex: 1; min-width: 160px; padding: 9px 12px; font-size: 14px;
+    border: 1px solid var(--bc-border); border-radius: 9px; }
+  .custfilters select { padding: 9px 10px; font-size: 13px; border: 1px solid var(--bc-border);
+    border-radius: 9px; background: #fff; }
+  .custfilters button { padding: 9px 16px; font-size: 13px; font-weight: 600; color: #fff;
+    background: var(--bc-primary); border: 0; border-radius: 9px; cursor: pointer; }
+  table.custtable { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  table.custtable th, table.custtable td { padding: 10px 14px; text-align: left;
+    border-bottom: 1px solid #f0f1f6; white-space: nowrap; }
+  table.custtable th { position: sticky; top: 0; background: #faf9f6; color: var(--bc-muted);
+    font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  table.custtable td.name { white-space: normal; font-weight: 600; }
+  table.custtable td.note { white-space: normal; max-width: 340px; min-width: 220px;
+    color: var(--bc-muted); font-size: 12.5px; line-height: 1.35; }
+  table.custtable tr:hover td { background: var(--bc-tint); }
+  .risk { font-weight: 600; font-size: 12px; padding: 2px 9px; border-radius: 999px; }
+  .risk.LOW, .risk.MID_TO_LOW { background: #e6f4ea; color: #137a3f; }
+  .risk.MID, .risk.MEDIUM { background: #fff1e0; color: var(--bc-primary-dark); }
+  .risk.HIGH, .risk.VERY_HIGH { background: #fde7e7; color: #b3261e; }
+  .muted { color: #b8b8b2; }
+
+  .searchbar { display: flex; gap: 10px; margin-bottom: 8px; }
+  .searchbar input[type=text] {
+    flex: 1; padding: 13px 16px; font-size: 15px; border: 1px solid var(--bc-border);
+    border-radius: 10px; outline: none; background: #fff;
+  }
+  .searchbar input[type=text]:focus { border-color: var(--bc-primary); }
+  .searchbar select {
+    padding: 0 12px; border: 1px solid var(--bc-border); border-radius: 10px; background: #fff;
+  }
+  .searchbar button {
+    padding: 0 22px; font-size: 15px; font-weight: 600; color: #fff;
+    background: var(--bc-primary); border: 0; border-radius: 10px; cursor: pointer;
+  }
+  .searchbar button:hover { background: var(--bc-primary-dark); }
+  .hint { color: var(--bc-muted); font-size: 13px; margin: 0 0 18px; }
+
+  .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
+  @media (max-width: 820px) { .layout { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--bc-card); border: 1px solid var(--bc-border); border-radius: 14px;
+    padding: 6px; min-height: 120px;
+  }
+  .panel h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--bc-muted);
+    margin: 12px 14px 8px;
+  }
+  .result {
+    padding: 13px 14px; border-radius: 10px; cursor: pointer; border: 1px solid transparent;
+  }
+  .result:hover { background: var(--bc-tint); }
+  .result.active { background: var(--bc-tint); border-color: var(--bc-primary); }
+  .result .name { font-weight: 600; font-size: 15px; }
+  .result .meta { color: var(--bc-muted); font-size: 13px; margin-top: 2px; }
+  .result .id { color: #9aa0ab; font-size: 11px; margin-top: 3px; font-family: ui-monospace, monospace; }
+
+  .empty { color: var(--bc-muted); font-size: 14px; padding: 26px 16px; text-align: center; }
+  .spinner { padding: 26px 16px; text-align: center; color: var(--bc-muted); }
+
+  table.kv { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  table.kv td { padding: 7px 14px; vertical-align: top; border-top: 1px solid #f0f1f6; }
+  table.kv td.k { color: var(--bc-muted); width: 38%; }
+  table.kv td.v { word-break: break-word; }
+
+  .actions { padding: 14px; border-top: 1px solid var(--bc-border); margin-top: 6px; }
+  .actions button {
+    width: 100%; padding: 12px; font-size: 14px; font-weight: 600; border-radius: 10px;
+    border: 0; cursor: pointer; background: var(--bc-primary); color: #fff;
+  }
+  .actions button:hover { background: var(--bc-primary-dark); }
+  .actions button:disabled { cursor: progress; background: #e7e8f0; color: #9aa0ab; }
+  .actions .note { color: var(--bc-muted); font-size: 12px; margin-top: 8px; text-align: center; }
+  .matter-ok { margin-top: 12px; font-size: 13px; }
+  .matter-ok .row { display: flex; justify-content: space-between; gap: 10px;
+    padding: 6px 0; border-top: 1px solid #f0f1f6; }
+  .matter-ok .row .k { color: var(--bc-muted); }
+  .matter-ok .row .v { font-family: ui-monospace, monospace; word-break: break-all; text-align: right; }
+  .matter-ok .ok-head { font-weight: 600; color: #137a3f; margin-bottom: 4px; }
+  .matter-ok .flow { color: var(--bc-primary-dark); font-weight: 600; }
+  .matter-err { margin-top: 12px; font-size: 13px; color: #b3261e; }
+  .matter-ok a { color: var(--bc-primary-dark); word-break: break-all; }
+
+  /* Workflow picker + iframe (step 4–8) */
+  #workflowSection { display: none; margin-top: 22px; }
+  .wf-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .wf-tab {
+    padding: 9px 14px; font-size: 13px; font-weight: 600; border-radius: 9px;
+    border: 1px solid var(--bc-border); background: #fff; color: var(--bc-text); cursor: pointer;
+  }
+  .wf-tab:hover { border-color: var(--bc-primary); }
+  .wf-tab.active { background: var(--bc-primary); border-color: var(--bc-primary); color: #fff; }
+  .wf-tab.internal { color: #7a7a74; background: #faf9f6; }
+  .wf-tab.internal.active { color: #fff; background: #7a7a74; border-color: #7a7a74; }
+  .wf-tab small { font-weight: 400; opacity: .8; }
+  .wf-detail { padding: 18px 20px; }
+  .wf-detail .note { color: var(--bc-muted); font-size: 13px; margin-bottom: 14px; }
+  .wf-task { display: flex; justify-content: space-between; gap: 12px; padding: 9px 2px;
+    border-top: 1px solid #f0f1f6; font-size: 13.5px; }
+  .wf-task .spec { font-family: ui-monospace, monospace; }
+  .wf-task .st { font-weight: 600; font-size: 12px; padding: 2px 9px; border-radius: 999px; }
+  .wf-task .st.OPEN { background: #fff1e0; color: var(--bc-primary-dark); }
+  .wf-task .st.COMPLETED, .wf-task .st.COMPLETE { background: #e6f4ea; color: #137a3f; }
+  .wf-task .st.LOCKED, .wf-task .st.HIDDEN { background: #f0f1f6; color: #6b6b66; }
+  .wf-task .k { color: var(--bc-muted); }
+  .wf-task .v { text-align: right; word-break: break-word; }
+  .wf-task .dl { color: var(--bc-primary-dark); font-weight: 600; white-space: nowrap; }
+  .zipbar { margin-bottom: 10px; }
+  .zipdl { display: inline-block; padding: 7px 13px; font-size: 13px; font-weight: 600;
+    background: var(--bc-primary); color: #fff; border-radius: 8px; text-decoration: none; }
+  .zipdl:hover { background: var(--bc-primary-dark); }
+  .doctype { display: inline-block; font-family: ui-monospace, monospace; font-size: 10.5px;
+    background: #eef0ff; color: #3730a3; padding: 1px 7px; border-radius: 999px; margin-left: 6px;
+    vertical-align: middle; }
+  .wf-tab.pinned { background: var(--bc-tint); border-color: #f3dcb6; }
+  .wf-tab.pinned.active { background: var(--bc-primary); color: #fff; border-color: var(--bc-primary); }
+  .wf-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+  .wf-act {
+    padding: 8px 13px; font-size: 13px; font-weight: 600; border-radius: 9px;
+    border: 1px solid var(--bc-border); background: #faf9f6; color: var(--bc-text); cursor: pointer;
+  }
+  .wf-act:hover { border-color: var(--bc-primary); }
+  .wf-act.active { background: #1d1d1b; border-color: #1d1d1b; color: #fff; }
+  .wf-frame-wrap {
+    background: #fff; border: 1px solid var(--bc-border); border-top: 3px solid var(--bc-primary);
+    border-radius: 14px; overflow: hidden;
+  }
+  .wf-frame-wrap iframe { width: 100%; height: 72vh; border: 0; display: block;
+    border-top: 1px solid var(--bc-tint); }
+  .wf-msg { padding: 40px; text-align: center; color: var(--bc-muted); }
+  .wf-bar {
+    display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+    border-bottom: 1px solid var(--bc-border); font-size: 13px; background: var(--bc-tint);
+  }
+  .af-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bc-primary);
+    flex: none; box-shadow: 0 0 0 3px rgba(255,150,0,.15); }
+  .wf-bar .grow { flex: 1; color: var(--bc-muted); }
+  .wf-bar a { color: var(--bc-primary-dark); font-weight: 600; }
+  .badge {
+    display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px;
+    background: var(--bc-tint); color: var(--bc-primary-dark); font-weight: 600;
+  }
+</style>
+</head>
+<body>
+<header>
+  <img class="logo" src="https://afileon.com/logo-json-ld.png" alt="Afileon"
+       onerror="this.onerror=null;this.src='https://afileon.com/favicon-196x196.png';this.style.height='28px';">
+  <div class="divider"></div>
+  <h1>Mandanten-Neuannahme · Unternehmenssuche</h1>
+  <div class="step">Schritt 1–2 von 9</div>
+</header>
+
+<nav class="topnav">
+  <button class="topnav-btn active" data-view="neuannahme">Mandanten-Neuannahme</button>
+  <button class="topnav-btn" data-view="kunden">Mandanten-Übersicht</button>
+</nav>
+
+<main id="viewNeuannahme">
+  <form class="searchbar" id="searchForm">
+    <input type="text" id="q" placeholder="Firmenname suchen, z. B. Founders1 GmbH" autocomplete="off" autofocus>
+    <select id="domain">
+      <option value="ENTITY">Unternehmen</option>
+      <option value="PERSON">Person</option>
+    </select>
+    <button type="submit">Suchen</button>
+  </form>
+  <p class="hint">BetterCo-Registersuche (NorthData). Treffer anklicken, um die Stammdaten zur Validierung zu sehen.</p>
+
+  <div class="layout" id="searchLayout">
+    <section class="panel" id="resultsPanel">
+      <h2>Trefferliste <span id="count" class="badge" style="display:none"></span></h2>
+      <div id="results"><div class="empty">Noch keine Suche ausgeführt.</div></div>
+    </section>
+
+    <section class="panel" id="detailPanel">
+      <h2>Stammdaten zur Validierung</h2>
+      <div id="detail"><div class="empty">Treffer links auswählen.</div></div>
+    </section>
+  </div>
+
+  <section id="workflowSection">
+    <h2 style="font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--bc-muted);margin:6px 2px 10px;display:flex;align-items:center;gap:10px;">
+      Daten &amp; Workflows der Akte <span id="wfStep" class="badge">Schritt 4–8</span>
+      <a id="showSearch" href="#" style="margin-left:auto;text-transform:none;letter-spacing:normal;color:var(--bc-primary-dark);font-weight:600;">↑ Suche &amp; Stammdaten einblenden</a></h2>
+    <div class="wf-tabs" id="wfTabs"></div>
+    <div class="wf-actions" id="wfActions">
+      <button class="wf-act" data-act="customer">Mandanten-Daten</button>
+      <button class="wf-act" data-act="documents">Mandanten-Dokumente</button>
+      <button class="wf-act" data-act="procdocs">Prozess-Dokumente</button>
+      <button class="wf-act" data-act="risk">Risiko-Profil</button>
+      <button class="wf-act" data-act="status">Process Status</button>
+    </div>
+    <div class="wf-frame-wrap">
+      <div class="wf-bar">
+        <span class="af-dot"></span>
+        <span class="grow" id="wfTitle">Workflow auswählen…</span>
+        <a id="wfOpen" href="#" target="_blank" style="display:none">In neuem Tab öffnen ↗</a>
+      </div>
+      <div id="wfBody"><div class="wf-msg">Oben einen Workflow wählen.</div></div>
+    </div>
+  </section>
+</main>
+
+<main id="viewKunden" style="display:none">
+  <div class="custfilters">
+    <input type="text" id="custFilter" placeholder="Name…" autocomplete="off">
+    <select id="fProc" disabled>
+      <option value="">Prozess: alle</option>
+      <option value="F18000_ReKYC">ReKYC</option>
+      <option value="F1600_RiskAMLScreening">Screening</option>
+    </select>
+    <select id="fStatus" disabled>
+      <option value="">Status: alle</option>
+      <option value="OPEN">OPEN</option>
+      <option value="COMPLETED">COMPLETED</option>
+      <option value="CLOSED">CLOSED</option>
+    </select>
+    <select id="fInd"><option value="">Branchen-Risiko: alle</option></select>
+    <select id="fCtry"><option value="">Länder-Risiko: alle</option></select>
+    <select id="fAml"><option value="">AML-Risiko: alle</option></select>
+    <button type="button" id="custReload">Neu laden</button>
+    <span id="procNote" style="font-size:12px;color:var(--bc-muted)"></span>
+  </div>
+  <div class="panel" style="padding:0;overflow:auto">
+    <table class="custtable" id="custTable">
+      <thead><tr>
+        <th>Name</th><th>KYC-Status</th><th>WZ-Code</th>
+        <th>Abgeleitete Steuerbranche</th><th>Branchen-Risiko</th>
+        <th>Länder-Risiko</th><th>AML-Risiko</th><th>Prüfnotiz</th>
+      </tr></thead>
+      <tbody id="custBody"><tr><td colspan="8" class="wf-msg">Noch nicht geladen.</td></tr></tbody>
+    </table>
+  </div>
+  <p class="hint" id="custCount"></p>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let hits = [], activeIdx = -1;
+
+// ── Top-level view switching: Neuannahme ↔ Mandanten-Übersicht ──
+let custLoaded = false, custRows = [];
+document.querySelectorAll(".topnav-btn").forEach(b => {
+  b.addEventListener("click", () => {
+    document.querySelectorAll(".topnav-btn").forEach(x => x.classList.remove("active"));
+    b.classList.add("active");
+    const v = b.dataset.view;
+    $("#viewNeuannahme").style.display = (v === "neuannahme") ? "" : "none";
+    $("#viewKunden").style.display = (v === "kunden") ? "" : "none";
+    if (v === "kunden" && !custLoaded) loadCustomerList();
+  });
+});
+$("#custReload").addEventListener("click", loadCustomerList);
+$("#custFilter").addEventListener("input", filterCustomers);
+["fProc", "fStatus", "fInd", "fCtry", "fAml"].forEach(id =>
+  $("#" + id).addEventListener("change", filterCustomers));
+
+function uniq(a) { return [...new Set(a.filter(Boolean))].sort(); }
+function fillSelect(id, values) {
+  const sel = $("#" + id), cur = sel.value, first = sel.querySelector("option");
+  sel.innerHTML = ""; sel.appendChild(first);
+  values.forEach(v => { const o = document.createElement("option"); o.value = v; o.textContent = v; sel.appendChild(o); });
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+}
+function populateFilters(rows) {
+  // fProc is a fixed selector (ReKYC / Screening) — only risk dropdowns are dynamic
+  fillSelect("fInd", uniq(rows.map(r => r.industryRisk)));
+  fillSelect("fCtry", uniq(rows.map(r => r.countryRisk)));
+  fillSelect("fAml", uniq(rows.map(r => r.amlRisk)));
+}
+
+// Process data (ReKYC + Screening status per customer) loads automatically in the
+// background after the table renders; the process/status filters enable when ready.
+async function loadProcessData() {
+  $("#procNote").textContent = "Prozessdaten werden geladen…";
+  try {
+    const res = await fetch("/api/customer-processes", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const d = await res.json();
+    if (d.error) { $("#procNote").textContent = "Prozessdaten: Fehler"; return; }
+    const pmap = d.processes || {};
+    custRows.forEach(r => { r.processes = pmap[r.id] || []; });
+    $("#fProc").disabled = false; $("#fStatus").disabled = false;
+    $("#procNote").textContent = "";
+    filterCustomers();
+  } catch (err) { $("#procNote").textContent = "Prozessdaten: Fehler"; }
+}
+function resetProcFilters() {
+  $("#fProc").disabled = true; $("#fProc").value = "";
+  $("#fStatus").disabled = true; $("#fStatus").value = "";
+  $("#procNote").textContent = "";
+}
+
+async function loadCustomerList() {
+  resetProcFilters();
+  $("#custBody").innerHTML = `<tr><td colspan="8" class="wf-msg">Lade Mandanten…</td></tr>`;
+  $("#custCount").textContent = "";
+  try {
+    const res = await fetch("/api/customers-list", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const d = await res.json();
+    if (d.error) { $("#custBody").innerHTML = `<tr><td colspan="8" class="wf-msg">Fehler: ${esc(d.error)}</td></tr>`; return; }
+    custRows = d.customers || [];
+    custLoaded = true;
+    populateFilters(custRows);
+    renderCustomers(custRows);
+    loadProcessData();   // background: ReKYC + Screening status per customer
+  } catch (err) {
+    $("#custBody").innerHTML = `<tr><td colspan="8" class="wf-msg">Fehler: ${esc(err)}</td></tr>`;
+  }
+}
+function rcell(v) { return v ? `<span class="risk ${esc(v)}">${esc(v)}</span>` : '<span class="muted">—</span>'; }
+function tcell(v) { return v ? esc(v) : '<span class="muted">—</span>'; }
+function renderCustomers(rows) {
+  $("#custCount").textContent = `${rows.length} / ${custRows.length} Mandanten`;
+  if (!rows.length) { $("#custBody").innerHTML = `<tr><td colspan="8" class="wf-msg">Keine Mandanten.</td></tr>`; return; }
+  $("#custBody").innerHTML = rows.map(r => `
+    <tr>
+      <td class="name">${esc(r.name || "—")}</td>
+      <td>${tcell(r.kycStatus)}</td>
+      <td>${tcell(r.wzCode)}</td>
+      <td>${tcell(r.taxIndustry)}</td>
+      <td>${rcell(r.industryRisk)}</td>
+      <td>${rcell(r.countryRisk)}</td>
+      <td>${rcell(r.amlRisk)}</td>
+      <td class="note" title="${esc(r.pruefnotiz || '')}">${tcell(r.pruefnotiz)}</td>
+    </tr>`).join("");
+}
+function filterCustomers() {
+  const q = $("#custFilter").value.toLowerCase();
+  const pName = $("#fProc").value, pStat = $("#fStatus").value;
+  const ind = $("#fInd").value, ctry = $("#fCtry").value, aml = $("#fAml").value;
+  renderCustomers(custRows.filter(r => {
+    if (q && !(r.name || "").toLowerCase().includes(q)) return false;
+    if (ind && r.industryRisk !== ind) return false;
+    if (ctry && r.countryRisk !== ctry) return false;
+    if (aml && r.amlRisk !== aml) return false;
+    if (pName || pStat) {
+      const hit = (r.processes || []).some(p =>
+        (!pName || (p.label || p.flow) === pName) &&
+        (!pStat || String(p.status || "").toUpperCase() === pStat));
+      if (!hit) return false;
+    }
+    return true;
+  }));
+}
+
+$("#searchForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const q = $("#q").value.trim();
+  const domain = $("#domain").value;
+  if (!q) return;
+  $("#results").innerHTML = '<div class="spinner">Suche läuft…</div>';
+  $("#detail").innerHTML = '<div class="empty">Treffer links auswählen.</div>';
+  $("#count").style.display = "none";
+  try {
+    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&domain=${domain}`);
+    const data = await res.json();
+    if (data.error) { $("#results").innerHTML = `<div class="empty">Fehler: ${data.error}</div>`; return; }
+    hits = data.hits || [];
+    renderResults();
+  } catch (err) {
+    $("#results").innerHTML = `<div class="empty">Netzwerkfehler: ${err}</div>`;
+  }
+});
+
+function renderResults() {
+  const c = $("#count");
+  c.textContent = hits.length; c.style.display = "inline-block";
+  if (!hits.length) { $("#results").innerHTML = '<div class="empty">Keine Treffer.</div>'; return; }
+  $("#results").innerHTML = hits.map((h, i) => `
+    <div class="result" data-idx="${i}">
+      <div class="name">${esc(h.name) || "(ohne Namen)"}</div>
+      ${h.subline ? `<div class="meta">${esc(h.subline)}</div>` : ""}
+      <div class="meta">${esc(h.address) || "—"}</div>
+      <div class="id">ND-ID ${esc(h.externalRegistryId) || ""}</div>
+    </div>`).join("");
+  document.querySelectorAll(".result").forEach(el =>
+    el.addEventListener("click", () => selectHit(parseInt(el.dataset.idx))));
+}
+
+function selectHit(i) {
+  activeIdx = i;
+  document.querySelectorAll(".result").forEach((el, idx) =>
+    el.classList.toggle("active", idx === i));
+  const raw = hits[i].raw || {};
+  const rows = Object.entries(raw)
+    .filter(([k, v]) => v !== null && v !== "" && typeof v !== "object")
+    .map(([k, v]) => `<tr><td class="k">${esc(k)}</td><td class="v">${esc(String(v))}</td></tr>`)
+    .join("");
+  const isPerson = (raw.domain || "ENTITY").toUpperCase() === "PERSON";
+  const flowText = isPerson
+    ? "F1900_OnboardingIndividual_A · F1900_OnboardingIndividual_E · F19000_ReKYC · F1600_RiskAMLScreening"
+    : "F1800_OnboardingEntity_A · F1800_OnboardingEntity_E · F18000_ReKYC · F1600_RiskAMLScreening";
+  $("#detail").innerHTML = `
+    <table class="kv">${rows || '<tr><td class="v">Keine flachen Felder.</td></tr>'}</table>
+    <div class="actions">
+      <button id="createBtn">Akte anlegen (Schritt 3) →</button>
+      <div class="note">Legt Mandant + Akte an und startet:<br><span class="flow">${flowText}</span></div>
+      <div id="matterResult"></div>
+    </div>`;
+  $("#createBtn").addEventListener("click", createMatter);
+}
+
+async function createMatter() {
+  if (activeIdx < 0) return;
+  const raw = hits[activeIdx].raw || {};
+  const btn = $("#createBtn");
+  btn.disabled = true; btn.textContent = "Akte wird angelegt…";
+  $("#matterResult").innerHTML = "";
+  try {
+    const res = await fetch("/api/create-matter", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: hits[activeIdx].name,
+        domain: raw.domain || "ENTITY",
+        externalRegistryId: hits[activeIdx].externalRegistryId,
+        firstName: raw.firstName || "",
+        lastName: raw.lastName || "",
+      }),
+    });
+    const d = await res.json();
+    if (d.error) {
+      $("#matterResult").innerHTML = `<div class="matter-err">Fehler: ${esc(d.error)}</div>`;
+      btn.disabled = false; btn.textContent = "Akte anlegen (Schritt 3) →";
+      return;
+    }
+    btn.textContent = "Akte angelegt ✓";
+    const procRows = (d.processes || []).map(p =>
+      `<div class="row"><span class="flow">${esc(p.flow)}</span><span class="v">${esc(p.id)}</span></div>`).join("");
+    const share = d.share_url
+      ? `<div class="row"><span class="k">Share-Link</span><span class="v"><a href="${esc(d.share_url)}" target="_blank">öffnen</a></span></div>`
+      : "";
+    $("#matterResult").innerHTML = `
+      <div class="matter-ok">
+        <div class="ok-head">Mandant + Akte angelegt</div>
+        <div class="row"><span class="k">Mandant (Client)</span><span class="v">${esc(d.businessRelationId)}</span></div>
+        <div class="row"><span class="k">Akte (Matter)</span><span class="v">${esc(d.case_id)}</span></div>
+        <div class="row"><span class="k">Kontakte (ND/CI angereichert)</span><span class="v">${esc(d.contact_count)}</span></div>
+        <div class="row"><span class="k">Dokumente (HR/Gesellschafterliste)</span><span class="v">${esc(d.document_count)}</span></div>
+        ${procRows}${share}
+      </div>
+      <div class="actions" style="border-top:0;padding-top:8px">
+        <button id="showWfBtn">Daten &amp; Workflows anzeigen →</button>
+      </div>`;
+    await buildWorkflows(d);
+    $("#showWfBtn").addEventListener("click", showDataAndWorkflows);
+  } catch (err) {
+    $("#matterResult").innerHTML = `<div class="matter-err">Netzwerkfehler: ${esc(err)}</div>`;
+    btn.disabled = false; btn.textContent = "Akte anlegen (Schritt 3) →";
+  }
+}
+
+let matter = null;
+
+// sort: Onboarding _A, Onboarding _E, ReKYC, Screening, rest
+function wfOrder(flow) {
+  const f = flow || "";
+  if (/Onboarding.*_A$/.test(f)) return 0;
+  if (/Onboarding.*_E$/.test(f)) return 1;
+  if (/ReKYC/.test(f)) return 2;
+  if (/RiskAMLScreening/.test(f)) return 3;
+  return 4;
+}
+
+async function buildWorkflows(d) {
+  matter = { cid: d.businessRelationId, case_id: d.case_id, processes: [] };
+  $("#wfTabs").innerHTML = `<div class="wf-msg" style="padding:6px">Workflows werden geladen…</div>`;
+  let procs = [];
+  try {
+    const res = await fetch("/api/processes", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cid: matter.cid, case_id: matter.case_id }),
+    });
+    procs = (await res.json()).processes || [];
+  } catch (err) {
+    $("#wfTabs").innerHTML = `<div class="wf-msg">Fehler beim Laden: ${esc(err)}</div>`;
+    return;
+  }
+  procs.sort((a, b) => wfOrder(a.flow) - wfOrder(b.flow));
+  matter.processes = procs;
+  const tabs = $("#wfTabs"); tabs.innerHTML = "";
+  procs.forEach(p => {
+    const internal = !p.shareable;
+    const el = document.createElement("div");
+    el.className = "wf-tab" + (internal ? " internal" : "");
+    const prog = (p.total != null) ? ` <small>${p.completed ?? 0}/${p.total}</small>` : "";
+    el.innerHTML = `${esc(p.label || p.flow)}${prog}${internal ? " <small>(intern)</small>" : ""}`;
+    el.title = p.flow || "";
+    el.addEventListener("click", () => selectWorkflow(p, el));   // all tabs clickable
+    tabs.appendChild(el); p._el = el;
+  });
+  const first = procs[0];
+  if (first) selectWorkflow(first, first._el);
+}
+
+let selectedProc = null;
+function docTypeTag(t) { return t ? ` <span class="doctype">${esc(t)}</span>` : ""; }
+
+async function selectWorkflow(proc, el) {
+  selectedProc = proc;
+  document.querySelectorAll("#wfTabs .wf-tab").forEach(t => t.classList.remove("active"));
+  document.querySelectorAll("#wfActions .wf-act").forEach(b => b.classList.remove("active"));
+  if (el) el.classList.add("active");
+  const title = proc.label || proc.flow;
+  const status = proc.status ? ` · ${esc(proc.status)}` : "";
+  $("#wfTitle").innerHTML = `${esc(title)} <small style="color:var(--bc-muted)">${esc(proc.flow)}${status}</small>`;
+  $("#wfOpen").style.display = "none";
+  $("#wfBody").innerHTML = `<div class="wf-msg">Wird geladen…</div>`;
+
+  if (!proc.shareable) return showInternal(proc, title);   // read-only view
+
+  try {
+    const res = await fetch("/api/process-link", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cid: matter.cid, case_id: matter.case_id, pid: proc.id }),
+    });
+    const d = await res.json();
+    if (d.share_url) {
+      $("#wfOpen").href = d.share_url; $("#wfOpen").style.display = "inline";
+      $("#wfBody").innerHTML = `<iframe src="${esc(d.share_url)}" title="${esc(title)}"></iframe>`;
+    } else {
+      $("#wfBody").innerHTML = `<div class="wf-msg">Kein Client-Runner.<br>${esc(d.error || "")}</div>`;
+    }
+  } catch (err) {
+    $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(err)}</div>`;
+  }
+}
+
+async function showInternal(proc, title) {
+  try {
+    const res = await fetch("/api/process-detail", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cid: matter.cid, case_id: matter.case_id, pid: proc.id }),
+    });
+    const d = await res.json();
+    if (d.error) { $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(d.error)}</div>`; return; }
+    const rows = (d.tasks || []).map(t =>
+      `<div class="wf-task"><span class="spec">${esc(t.taskSpec || "")}</span>
+         <span class="st ${esc(t.status || "")}">${esc(t.status || "")}</span></div>`).join("");
+    $("#wfBody").innerHTML = `
+      <div class="wf-detail">
+        <div class="note">Interner Prozess – kein Client-Runner (nicht teilbar). Schreibgeschützte Ansicht.
+          Status <b>${esc(d.status || "")}</b> · ${esc(d.completed ?? 0)}/${esc(d.total ?? "?")} Aufgaben.</div>
+        ${rows || '<div class="wf-msg">Keine Aufgaben.</div>'}
+      </div>`;
+  } catch (err) {
+    $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(err)}</div>`;
+  }
+}
+
+function showDataAndWorkflows() {
+  $("#searchLayout").style.display = "none";          // collapse Trefferliste + Stammdaten
+  $("#workflowSection").style.display = "block";
+  $("#workflowSection").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+$("#showSearch").addEventListener("click", (e) => {
+  e.preventDefault();
+  $("#searchLayout").style.display = "";              // restore the search grid
+  window.scrollTo({ top: 0, behavior: "smooth" });
+});
+
+// Row 2: action buttons (wired once; act on matter / selected workflow)
+document.querySelectorAll("#wfActions .wf-act").forEach(btn => {
+  btn.addEventListener("click", () => {
+    if (!matter) return;
+    document.querySelectorAll("#wfActions .wf-act").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    const act = btn.dataset.act;
+    if (act === "customer") showCustomer();
+    else if (act === "documents") showDocuments();
+    else if (act === "procdocs") showProcessDocs(selectedProc);
+    else if (act === "risk") showRisk();
+    else if (act === "status") showProcessStatus(selectedProc);
+  });
+});
+
+async function showProcessDocs(proc) {
+  $("#wfOpen").style.display = "none";
+  if (!proc) { $("#wfBody").innerHTML = `<div class="wf-msg">Kein Workflow ausgewählt.</div>`; return; }
+  $("#wfTitle").innerHTML = `Prozess-Dokumente <small style="color:var(--bc-muted)">${esc(proc.label || proc.flow)}</small>`;
+  $("#wfBody").innerHTML = `<div class="wf-msg">Wird geladen…</div>`;
+  try {
+    const res = await fetch("/api/process-documents", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cid: matter.cid, case_id: matter.case_id, pid: proc.id }),
+    });
+    const d = await res.json();
+    if (d.error) { $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(d.error)}</div>`; return; }
+    const docs = d.documents || [];
+    if (!docs.length) { $("#wfBody").innerHTML = `<div class="wf-msg">Keine Prozess-Dokumente für diesen Workflow.</div>`; return; }
+    const rows = docs.map(doc =>
+      `<div class="wf-task">
+         <span class="spec">${esc(doc.displayName || doc.id)}${docTypeTag(doc.documentType)}</span>
+         <a class="dl" href="/api/document?cid=${encodeURIComponent(matter.cid)}&case_id=${encodeURIComponent(matter.case_id)}&pid=${encodeURIComponent(proc.id)}&doc_id=${encodeURIComponent(doc.id)}">herunterladen ↓</a>
+       </div>`).join("");
+    const zip = `/api/documents-zip?cid=${encodeURIComponent(matter.cid)}&case_id=${encodeURIComponent(matter.case_id)}&pid=${encodeURIComponent(proc.id)}`;
+    $("#wfBody").innerHTML = `<div class="wf-detail">
+      <div class="zipbar"><a class="zipdl" href="${zip}">⬇ Alle als ZIP (${docs.length})</a></div>${rows}</div>`;
+  } catch (err) { $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(err)}</div>`; }
+}
+
+async function showProcessStatus(proc) {
+  $("#wfOpen").style.display = "none";
+  if (!proc) { $("#wfBody").innerHTML = `<div class="wf-msg">Kein Workflow ausgewählt.</div>`; return; }
+  $("#wfTitle").innerHTML = `Process Status <small style="color:var(--bc-muted)">${esc(proc.label || proc.flow)}</small>`;
+  $("#wfBody").innerHTML = `<div class="wf-msg">Wird geladen…</div>`;
+  try {
+    const res = await fetch("/api/process-detail", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cid: matter.cid, case_id: matter.case_id, pid: proc.id }),
+    });
+    const d = await res.json();
+    if (d.error) { $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(d.error)}</div>`; return; }
+    const rows = (d.tasks || []).map(t =>
+      `<div class="wf-task"><span class="spec">${esc(t.taskSpec || "")}</span>
+         <span class="st ${esc(t.status || "")}">${esc(t.status || "")}</span></div>`).join("");
+    $("#wfBody").innerHTML = `
+      <div class="wf-detail">
+        <div class="note">Status <b>${esc(d.status || "?")}</b> · ${esc(d.completed ?? 0)}/${esc(d.total ?? "?")} Aufgaben abgeschlossen
+          ${d.open != null ? `· ${esc(d.open)} offen` : ""}.</div>
+        ${rows || '<div class="wf-msg">Keine Aufgaben.</div>'}
+      </div>`;
+  } catch (err) { $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(err)}</div>`; }
+}
+
+async function showRisk() {
+  $("#wfOpen").style.display = "none";
+  $("#wfTitle").innerHTML = `Risiko-Profil <small style="color:var(--bc-muted)">getCustomerById</small>`;
+  $("#wfBody").innerHTML = `<div class="wf-msg">Wird geladen…</div>`;
+  try {
+    const res = await fetch("/api/risk-profile", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cid: matter.cid }) });
+    const d = await res.json();
+    if (d.error) { $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(d.error)}</div>`; return; }
+    const txt = v => v ? esc(v) : '<span class="muted">—</span>';
+    const risk = v => v ? `<span class="risk ${esc(v)}">${esc(v)}</span>` : '<span class="muted">—</span>';
+    const kv = (k, v) => `<div class="wf-task"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`;
+    $("#wfBody").innerHTML = `<div class="wf-detail">
+      ${kv("Prüfnotiz (kycNote)", txt(d.pruefnotiz))}
+      ${kv("KYC-Status", txt(d.kycStatus))}
+      ${kv("WZ-Code", txt(d.wzCode))}
+      ${kv("Abgeleitete Steuerbranche", txt(d.taxIndustry))}
+      ${kv("Branchen-Risiko", risk(d.derivedIndustryRisk))}
+      ${kv("Länder-Risiko", risk(d.derivedCountryRisk))}
+      ${kv("AML-Risiko", risk(d.amlRisk))}
+    </div>`;
+  } catch (err) { $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(err)}</div>`; }
+}
+
+async function showCustomer() {
+  $("#wfTitle").textContent = "Mandanten-Daten (getCustomerById)";
+  $("#wfBody").innerHTML = `<div class="wf-msg">Wird geladen…</div>`;
+  try {
+    const res = await fetch("/api/customer", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cid: matter.cid }),
+    });
+    const d = await res.json();
+    if (d.error) { $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(d.error)}</div>`; return; }
+    const cu = d.customer || {};
+    const li = cu.legalInfo || {};
+    const reg = (li.registerData && li.registerData[0]) || {};
+    const addr = (cu.addressData && cu.addressData.addresses && cu.addressData.addresses[0]) || {};
+    const lt = li.legalType || {};
+    const fields = [
+      ["Name", li.legalName],
+      ["Rechtsform", lt.typeDe || lt.typeEn],
+      ["Register", [reg.registerLegalType, reg.registerId, reg.registerZone].filter(Boolean).join(" ")],
+      ["Typ / Stage", [cu.type, cu.entityStageType].filter(Boolean).join(" · ")],
+      ["Adresse", [addr.street, addr.postalCode, addr.city, addr.country].filter(Boolean).join(", ")],
+      ["WZ-Codes", (cu.segmentCodes && cu.segmentCodes.wz || []).join(", ")],
+      ["Externe IDs", (cu.externalIdentifiers || []).map(x => `${x.system}:${x.externalId}`).join(", ")],
+      ["UBOs", (cu.uboData && cu.uboData.ubos || []).length],
+      ["Kontakte", (cu.contactData && cu.contactData.length) || (cu.contacts && cu.contacts.length) || ""],
+    ];
+    const rows = fields.filter(([, v]) => v !== "" && v != null && v !== undefined)
+      .map(([k, v]) => `<div class="wf-task"><span class="k">${esc(k)}</span><span class="v">${esc(String(v))}</span></div>`).join("");
+    const blob = "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(cu, null, 2));
+    $("#wfTitle").innerHTML = `Mandanten-Daten <small style="color:var(--bc-muted)">getCustomerById</small>`;
+    $("#wfBody").innerHTML = `
+      <div class="wf-detail">
+        ${rows}
+        <div style="margin-top:14px"><a href="${blob}" download="customer_${esc(matter.cid)}.json"
+           style="color:var(--bc-primary-dark);font-weight:600">Rohdaten (JSON) herunterladen ↓</a></div>
+      </div>`;
+  } catch (err) {
+    $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(err)}</div>`;
+  }
+}
+
+async function showDocuments() {
+  $("#wfTitle").textContent = "Dokumente (getCustomerDocuments)";
+  $("#wfBody").innerHTML = `<div class="wf-msg">Wird geladen…</div>`;
+  try {
+    const res = await fetch("/api/documents", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cid: matter.cid }),
+    });
+    const d = await res.json();
+    if (d.error) { $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(d.error)}</div>`; return; }
+    const docs = d.documents || [];
+    $("#wfTitle").innerHTML = `Dokumente <small style="color:var(--bc-muted)">${docs.length} · getCustomerDocuments</small>`;
+    if (!docs.length) { $("#wfBody").innerHTML = `<div class="wf-msg">Keine Dokumente.</div>`; return; }
+    const rows = docs.map(doc =>
+      `<div class="wf-task">
+         <span class="spec">${esc(doc.displayName || doc.id)}${docTypeTag(doc.documentType)}</span>
+         <a class="dl" href="/api/document?cid=${encodeURIComponent(matter.cid)}&doc_id=${encodeURIComponent(doc.id)}">herunterladen ↓</a>
+       </div>`).join("");
+    const zip = `/api/documents-zip?cid=${encodeURIComponent(matter.cid)}`;
+    $("#wfBody").innerHTML = `<div class="wf-detail">
+      <div class="zipbar"><a class="zipdl" href="${zip}">⬇ Alle als ZIP (${docs.length})</a></div>${rows}</div>`;
+  } catch (err) {
+    $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(err)}</div>`;
+  }
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+</script>
+</body>
+</html>
