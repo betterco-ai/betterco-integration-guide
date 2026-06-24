@@ -925,7 +925,15 @@ async function showContacts() {
 }
 
 function renderContactsList(contacts) {
-  if (!contacts.length) { $("#wfBody").innerHTML = `<div class="wf-msg">Keine Kontakte / Relationen.</div>`; return; }
+  const addBar = `<div style="display:flex;justify-content:flex-end;margin-bottom:12px">
+      <button id="newContactBtn" class="wf-act" style="font-weight:600">+ Neuer Kontakt</button>
+    </div>`;
+
+  if (!contacts.length) {
+    $("#wfBody").innerHTML = addBar + `<div class="wf-msg">Keine Kontakte / Relationen.</div>`;
+    $("#newContactBtn").addEventListener("click", openNewContactForm);
+    return;
+  }
 
   const heldByContact = {};
   contacts.forEach(c => {
@@ -956,8 +964,9 @@ function renderContactsList(contacts) {
     </div>`;
   }).join("");
 
-  $("#wfBody").innerHTML = `<div class="wf-detail">${rows}</div>`;
+  $("#wfBody").innerHTML = addBar + `<div class="wf-detail">${rows}</div>`;
 
+  $("#newContactBtn").addEventListener("click", openNewContactForm);
   document.querySelectorAll("[data-rel-idx]").forEach(btn => {
     btn.addEventListener("click", () => openRelationPicker(btn, contacts[+btn.dataset.relIdx], heldByContact));
   });
@@ -966,27 +975,174 @@ function renderContactsList(contacts) {
   });
 }
 
+// New contact via REST PUT /customers/{cid}/contacts. Asks Entity vs Individual
+// (binding is `type`: ENTITY|INDIVIDUAL) — company name for an entity, first +
+// last name for a person. A role/relation is REQUIRED: without it the API returns
+// 201 but silently discards the contact, so the picker is mandatory.
+function openNewContactForm() {
+  $("#wfBody").innerHTML = `
+    <div class="wf-detail" style="max-width:520px">
+      <div style="font-weight:700;margin-bottom:14px">Neuer Kontakt <small style="color:var(--bc-muted)">PUT /customers/{cid}/contacts</small></div>
+      <div style="display:flex;gap:18px;margin-bottom:14px">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="ncType" value="ENTITY" checked> Unternehmen</label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="ncType" value="INDIVIDUAL"> Person</label>
+      </div>
+      <div id="ncEntityFields">
+        ${ncField("ncCompany", "Firmenname", "z. B. Founders1 GmbH")}
+      </div>
+      <div id="ncPersonFields" style="display:none">
+        ${ncField("ncFirst", "Vorname", "z. B. Max")}
+        ${ncField("ncLast", "Nachname", "z. B. Mustermann")}
+      </div>
+      <label style="display:block;font-size:12px;color:var(--bc-muted);margin:0 0 4px">Rollen / Relationen <span style="color:var(--bc-muted)">(mind. eine, Mehrfachauswahl)</span></label>
+      <div style="margin-bottom:16px">${roleChecksHtml(RELATION_OPTIONS)}</div>
+      <div id="ncMsg" style="color:#b3261e;font-size:13px;min-height:18px;margin-bottom:8px"></div>
+      <div style="display:flex;gap:10px">
+        <button id="ncSave" style="padding:8px 16px;font-size:14px;font-weight:600;color:#fff;background:var(--bc-primary);border:0;border-radius:8px;cursor:pointer">Anlegen</button>
+        <button id="ncCancel" style="padding:8px 14px;font-size:14px;border:1px solid var(--bc-border);border-radius:8px;background:#fff;cursor:pointer">Abbrechen</button>
+      </div>
+    </div>`;
+
+  const entityFields = $("#ncEntityFields"), personFields = $("#ncPersonFields");
+  document.querySelectorAll("input[name=ncType]").forEach(r => r.addEventListener("change", () => {
+    const isEntity = document.querySelector("input[name=ncType]:checked").value === "ENTITY";
+    entityFields.style.display = isEntity ? "" : "none";
+    personFields.style.display = isEntity ? "none" : "";
+  }));
+
+  $("#ncCancel").addEventListener("click", showContacts);
+  $("#ncSave").addEventListener("click", submitNewContact);
+}
+
+function ncField(id, label, placeholder) {
+  return `<label style="display:block;font-size:12px;color:var(--bc-muted);margin:0 0 4px">${esc(label)}</label>
+    <input id="${id}" type="text" placeholder="${esc(placeholder)}" style="width:100%;padding:7px 10px;font-size:14px;border:1px solid var(--bc-border);border-radius:8px;margin-bottom:14px">`;
+}
+
+// Multi-select role picker: a set of checkbox "pills". Tick several to assign more
+// than one role at once. checkedRoles(scopeEl) reads the ticked codes back.
+function roleChecksHtml(options) {
+  return `<span class="role-checks" style="display:inline-flex;flex-wrap:wrap;gap:8px;vertical-align:middle">
+    ${options.map(o => `<label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;padding:5px 10px;border:1px solid var(--bc-border);border-radius:999px;background:#fff;cursor:pointer">
+      <input type="checkbox" value="${esc(o.code)}"> ${esc(o.label)}</label>`).join("")}
+  </span>`;
+}
+
+function checkedRoles(scopeEl) {
+  return Array.from(scopeEl.querySelectorAll(".role-checks input:checked")).map(i => i.value);
+}
+
+// Compact multi-select dropdown (for the tight inline row on existing contacts):
+// a small toggle button opens a floating checkbox panel that OVERLAYS the layout
+// (position:absolute) so the Hinzufügen button stays visible. The panel keeps the
+// .role-checks class so checkedRoles() reads it like the inline pill group.
+function roleDropdownHtml(options) {
+  return `<span class="role-dd" style="position:relative;display:inline-block;vertical-align:middle">
+    <button type="button" class="role-dd-toggle" style="padding:4px 10px;font-size:13px;border:1px solid var(--bc-border);border-radius:8px;background:#fff;cursor:pointer;min-width:128px;text-align:left">Rollen wählen ▾</button>
+    <span class="role-checks role-dd-panel" style="display:none;position:absolute;top:calc(100% + 4px);right:0;z-index:50;background:#fff;border:1px solid var(--bc-border);border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.14);padding:6px;min-width:180px">
+      ${options.map(o => `<label style="display:flex;align-items:center;gap:8px;font-size:13px;padding:4px 6px;border-radius:6px;cursor:pointer;white-space:nowrap">
+        <input type="checkbox" value="${esc(o.code)}"> ${esc(o.label)}</label>`).join("")}
+    </span>
+  </span>`;
+}
+
+function wireRoleDropdown(scopeEl) {
+  const dd = scopeEl.querySelector(".role-dd");
+  if (!dd) return;
+  const toggle = dd.querySelector(".role-dd-toggle");
+  const panel = dd.querySelector(".role-dd-panel");
+
+  // Position the panel as FIXED (escapes any overflow/scroll clipping) and flip it
+  // ABOVE the button when there isn't enough room below — so the picker for the
+  // last rows isn't lost below the fold. Right edge stays aligned with the toggle.
+  const place = () => {
+    const r = toggle.getBoundingClientRect();
+    panel.style.position = "fixed";
+    panel.style.right = "auto";
+    panel.style.left = Math.max(8, r.right - panel.offsetWidth) + "px";
+    const ph = panel.offsetHeight;
+    const below = window.innerHeight - r.bottom;
+    panel.style.top = (below < ph + 12 && r.top > ph + 12 ? r.top - ph - 4 : r.bottom + 4) + "px";
+  };
+  const close = () => { panel.style.display = "none"; };
+
+  toggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (panel.style.display !== "none") { close(); return; }
+    panel.style.display = "block";
+    place();   // measure after it's visible
+  });
+  panel.addEventListener("click", (e) => e.stopPropagation());
+  panel.addEventListener("change", () => {
+    const n = panel.querySelectorAll("input:checked").length;
+    toggle.textContent = n ? `${n} Rolle${n > 1 ? "n" : ""} ▾` : "Rollen wählen ▾";
+  });
+  // outside click / scroll / resize closes the panel; handlers self-remove once gone
+  const onDismiss = (e) => {
+    if (!document.body.contains(dd)) {
+      document.removeEventListener("click", onDismiss);
+      window.removeEventListener("scroll", onDismiss, true);
+      window.removeEventListener("resize", onDismiss);
+      return;
+    }
+    if (e && e.type === "click" && dd.contains(e.target)) return;
+    close();
+  };
+  document.addEventListener("click", onDismiss);
+  window.addEventListener("scroll", onDismiss, true);
+  window.addEventListener("resize", onDismiss);
+}
+
+async function submitNewContact() {
+  const type = document.querySelector("input[name=ncType]:checked").value;
+  const relationCodes = checkedRoles($("#wfBody"));
+  const payload = { cid: matter.cid, type, relationCodes };
+  if (type === "ENTITY") {
+    payload.companyName = $("#ncCompany").value.trim();
+    if (!payload.companyName) { $("#ncMsg").textContent = "Firmenname erforderlich."; return; }
+  } else {
+    payload.firstName = $("#ncFirst").value.trim();
+    payload.lastName = $("#ncLast").value.trim();
+    if (!payload.firstName || !payload.lastName) { $("#ncMsg").textContent = "Vorname und Nachname erforderlich."; return; }
+  }
+  if (!relationCodes.length) { $("#ncMsg").textContent = "Mind. eine Rolle wählen."; return; }
+  const save = $("#ncSave");
+  save.disabled = true; save.textContent = "…"; $("#ncMsg").textContent = "";
+  try {
+    const res = await fetch("/api/contact-create", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const d = await res.json();
+    if (d.error) { save.disabled = false; save.textContent = "Anlegen"; $("#ncMsg").textContent = "Fehler: " + d.error; return; }
+    await new Promise(r => setTimeout(r, 600));
+    showContacts();
+  } catch (err) {
+    save.disabled = false; save.textContent = "Anlegen"; $("#ncMsg").textContent = "Fehler: " + err;
+  }
+}
+
 function openRelationPicker(triggerBtn, contact, heldByContact) {
   const wrap = triggerBtn.closest(".rel-add-wrap");
   const available = RELATION_OPTIONS.filter(o => !(heldByContact[contact.contactId] || new Set()).has(o.label));
   if (!available.length) return;
 
   wrap.innerHTML = `
-    <select id="relPicker" style="padding:4px 8px;font-size:13px;border:1px solid var(--bc-border);border-radius:8px;background:#fff">
-      ${available.map(o => `<option value="${esc(o.code)}">${esc(o.label)}</option>`).join("")}
-    </select>
+    ${roleDropdownHtml(available)}
     <button id="relConfirm" style="padding:4px 10px;font-size:13px;font-weight:600;color:#fff;background:var(--bc-primary);border:0;border-radius:8px;cursor:pointer;margin-left:6px">Hinzufügen</button>
     <button id="relCancel" style="padding:4px 8px;font-size:13px;border:1px solid var(--bc-border);border-radius:8px;background:#fff;cursor:pointer;margin-left:4px">✕</button>`;
 
+  wireRoleDropdown(wrap);
   document.getElementById("relCancel").addEventListener("click", () => showContacts());
   document.getElementById("relConfirm").addEventListener("click", async () => {
-    const code = document.getElementById("relPicker").value;
+    const relationCodes = checkedRoles(wrap);
     const confirmBtn = document.getElementById("relConfirm");
+    if (!relationCodes.length) { confirmBtn.textContent = "Rolle wählen"; setTimeout(() => confirmBtn.textContent = "Hinzufügen", 1200); return; }
     confirmBtn.disabled = true; confirmBtn.textContent = "…";
     try {
       const res = await fetch("/api/contact-add-relation", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cid: matter.cid, contactId: contact.contactId, relationCode: code }),
+        body: JSON.stringify({ cid: matter.cid, contactId: contact.contactId, relationCodes }),
       });
       const d = await res.json();
       if (d.error) {

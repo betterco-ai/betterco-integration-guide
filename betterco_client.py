@@ -8,9 +8,25 @@ import datetime
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 load_dotenv()
 log = logging.getLogger("betterco")
+
+# (connect, read) seconds applied to any session call that doesn't pass its own
+# timeout. A short connect bound turns a dead/slow peer into a fast, retryable
+# error instead of the OS-level ~21s hang that surfaces as WinError 10060.
+DEFAULT_TIMEOUT = (10, 60)
+
+
+class _TimeoutRetryAdapter(HTTPAdapter):
+    """HTTPAdapter that injects DEFAULT_TIMEOUT when a request has none."""
+
+    def send(self, request, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = DEFAULT_TIMEOUT
+        return super().send(request, **kwargs)
 
 BASE_URL = os.getenv("BETTERCO_BASE_URL", "https://editor.betterco.ai/bcapi")
 API_KEY = os.getenv("BETTERCO_API_KEY")
@@ -42,6 +58,23 @@ class BetterCoClient:
         self.token_expiry = 0
         self.session = requests.Session()
         self.session.verify = os.getenv("BETTERCO_SSL_VERIFY", "true").lower() not in ("false", "0", "no")
+        self._configure_session()
+
+    def _configure_session(self):
+        """Retry transient failures with backoff and size the pool for the app's
+        16-worker fan-out. Retries cover connect/read errors and 429/5xx; the
+        default idempotent allowlist means POST creates (matter/process) are NOT
+        auto-retried, so this can't double-submit them.
+        """
+        retry = Retry(
+            total=3, connect=3, read=2, backoff_factor=0.5,
+            status_forcelist=(429, 500, 502, 503, 504),
+            raise_on_status=False,
+        )
+        adapter = _TimeoutRetryAdapter(
+            max_retries=retry, pool_connections=20, pool_maxsize=20)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     @classmethod
     def from_workspace_env(cls, env_path):

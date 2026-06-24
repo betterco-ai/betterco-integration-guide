@@ -17,6 +17,9 @@ import argparse
 import json
 import logging
 import mimetypes
+import os
+import signal
+import subprocess
 import threading
 import time
 import webbrowser
@@ -133,6 +136,23 @@ def _first(*vals):
         if v not in (None, ""):
             return v
     return None
+
+
+def _relation_codes(body: dict) -> list:
+    """Normalize a contact's role codes from a request body, de-duped in order.
+
+    Accepts the multi-select `relationCodes` (list) and falls back to the legacy
+    single `relationCode` so older callers keep working.
+    """
+    raw = body.get("relationCodes")
+    if not isinstance(raw, list):
+        raw = [body.get("relationCode")]
+    out = []
+    for c in raw:
+        c = str(c or "").strip()
+        if c and c not in out:
+            out.append(c)
+    return out
 
 
 def _risk_fields_rest(cu: dict) -> dict:
@@ -373,6 +393,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_customer_processes(body)
         if parsed.path == "/api/contacts":
             return self._handle_contacts(body)
+        if parsed.path == "/api/contact-create":
+            return self._handle_contact_create(body)
         if parsed.path == "/api/contact-add-relation":
             return self._handle_contact_add_relation(body)
         if parsed.path == "/api/contact-delete-relation":
@@ -815,17 +837,70 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             return self._send_json({"error": str(exc)}, 500)
 
-    def _handle_contact_add_relation(self, body: dict):
-        """RelationController.addRelation — add a role/relation to one contact."""
+    def _handle_contact_create(self, body: dict):
+        """Create a new contact on a customer via REST PUT /customers/{cid}/contacts.
+
+        The create-body type binding is `type` (INDIVIDUAL | ENTITY), NOT
+        entityType — the read side uses contactType, but the PUT body uses `type`
+        (same as create_customer). ENTITY captures companyName -> legalInfo.legalName;
+        INDIVIDUAL captures firstName + lastName. `relations` is REQUIRED: without a
+        role the PUT returns 201 but the contact is silently discarded, so at least
+        one relationCode must be supplied.
+        """
         cid = (body.get("cid") or "").strip()
-        contact_id = (body.get("contactId") or "").strip()
-        relation_code = (body.get("relationCode") or "").strip()
-        if not (cid and contact_id and relation_code):
-            return self._send_json({"error": "cid, contactId, relationCode required"}, 400)
+        ctype = (body.get("type") or "").strip().upper()
+        codes = _relation_codes(body)
+        if not cid:
+            return self._send_json({"error": "cid required"}, 400)
+        if ctype not in ("INDIVIDUAL", "ENTITY"):
+            return self._send_json({"error": "type must be INDIVIDUAL or ENTITY"}, 400)
+        if not codes:
+            return self._send_json(
+                {"error": "mind. eine Rolle erforderlich (sonst verwirft die API den Kontakt)"}, 400)
+        if ctype == "ENTITY":
+            name = (body.get("companyName") or "").strip()
+            if not name:
+                return self._send_json({"error": "companyName erforderlich"}, 400)
+            contact_body = {
+                "type": "ENTITY",
+                "legalInfo": {"legalName": name},
+                "relations": codes,
+            }
+        else:
+            first = (body.get("firstName") or "").strip()
+            last = (body.get("lastName") or "").strip()
+            if not (first and last):
+                return self._send_json({"error": "firstName und lastName erforderlich"}, 400)
+            full = f"{first} {last}".strip()
+            contact_body = {
+                "type": "INDIVIDUAL",
+                "legalInfo": {"legalName": full, "firstName": first, "lastName": last},
+                "firstName": first,
+                "lastName": last,
+                "relations": codes,
+            }
         try:
             with _client_lock:
-                result = _client.add_contact_relation(cid, contact_id, relation_code)
-            return self._send_json({"ok": True, "result": result})
+                contact_id = _client.create_contact(cid, contact_body)
+            return self._send_json({"ok": True, "contactId": contact_id})
+        except Exception as exc:  # noqa: BLE001
+            return self._send_json({"error": str(exc)}, 500)
+
+    def _handle_contact_add_relation(self, body: dict):
+        """RelationController.addRelation — add one or more roles to one contact.
+
+        addRelation is single-role, so multiple codes are added in a loop; the
+        first failure is reported (any roles added before it stay added).
+        """
+        cid = (body.get("cid") or "").strip()
+        contact_id = (body.get("contactId") or "").strip()
+        codes = _relation_codes(body)
+        if not (cid and contact_id and codes):
+            return self._send_json({"error": "cid, contactId und mind. eine Rolle erforderlich"}, 400)
+        try:
+            with _client_lock:
+                results = [_client.add_contact_relation(cid, contact_id, c) for c in codes]
+            return self._send_json({"ok": True, "added": len(results), "results": results})
         except Exception as exc:  # noqa: BLE001
             return self._send_json({"error": str(exc)}, 500)
 
@@ -877,6 +952,46 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"error": str(exc), "hits": []}, 500)
 
 
+def _free_port(port: int) -> None:
+    """Kill any process already LISTENING on `port` before we bind.
+
+    A stale app instance left on the port is otherwise silently kept alive by
+    SO_REUSEADDR (both processes bind, the OS keeps routing to the old code) —
+    so a fresh start would serve outdated routes. Best-effort; never our own PID.
+    """
+    me = os.getpid()
+    pids = set()
+    try:
+        if os.name == "nt":
+            # Match the listener by its wildcard foreign address, NOT the State
+            # column — that column is localized (e.g. "ABHÖREN" on German Windows),
+            # so a string match on "LISTENING" silently finds nothing.
+            out = subprocess.run(["netstat", "-ano", "-p", "tcp"],
+                                 capture_output=True, text=True).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if (len(parts) >= 5 and parts[1].endswith(f":{port}")
+                        and parts[2] in ("0.0.0.0:0", "[::]:0", "*:*")
+                        and parts[4].isdigit()):
+                    pids.add(int(parts[4]))
+        else:
+            out = subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+                                 capture_output=True, text=True).stdout
+            pids = {int(x) for x in out.split()}
+    except Exception as exc:  # noqa: BLE001
+        print(f"!! could not scan port {port}: {exc}", flush=True)
+        return
+    for pid in pids - {me, 0}:
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+            else:
+                os.kill(pid, signal.SIGKILL)
+            print(f"** freed port {port}: killed stale process PID {pid}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"!! could not kill PID {pid} on port {port}: {exc}", flush=True)
+
+
 def main() -> None:
     global _client, _org_id, _env_file, _status
     logging.basicConfig(
@@ -904,6 +1019,7 @@ def main() -> None:
               f"Open the app and set credentials under 'Zugangsdaten'.")
     url = f"http://localhost:{args.port}"
     print(f"BetterCo PoC search widget -> {url}  (env: {args.env_file})")
+    _free_port(args.port)   # kill any stale instance squatting the port
     if not args.no_browser:
         webbrowser.open(url)
     ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
