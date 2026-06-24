@@ -290,6 +290,7 @@
       <button class="wf-act" data-act="procdocs">Prozess-Dokumente</button>
       <button class="wf-act" data-act="risk">Risiko-Profil</button>
       <button class="wf-act" data-act="status">Process Status</button>
+      <button class="wf-act" data-act="contacts">Kontakte</button>
     </div>
     <div class="wf-frame-wrap">
       <div class="wf-bar">
@@ -753,6 +754,7 @@ document.querySelectorAll("#wfActions .wf-act").forEach(btn => {
     else if (act === "procdocs") showProcessDocs(selectedProc);
     else if (act === "risk") showRisk();
     else if (act === "status") showProcessStatus(selectedProc);
+    else if (act === "contacts") showContacts();
   });
 });
 
@@ -895,6 +897,122 @@ async function showDocuments() {
   } catch (err) {
     $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(err)}</div>`;
   }
+}
+
+// All available relations (code → label). Used for "Add relation" picker.
+const RELATION_OPTIONS = [
+  { code: "9010", label: "Legal Rep" },
+  { code: "9030", label: "UBO" },
+  { code: "9060", label: "Acting Person" },
+  { code: "3010", label: "Owner" },
+  { code: "1520", label: "Managing Director" },
+  { code: "3040", label: "Shareholder" },
+];
+
+async function showContacts() {
+  $("#wfOpen").style.display = "none";
+  $("#wfTitle").innerHTML = `Kontakte <small style="color:var(--bc-muted)">GET /api/relations</small>`;
+  $("#wfBody").innerHTML = `<div class="wf-msg"><span class="af-spin"></span>Wird geladen…</div>`;
+  try {
+    const res = await fetch("/api/contacts", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cid: matter.cid }),
+    });
+    const d = await res.json();
+    if (d.error) { $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(d.error)}</div>`; return; }
+    renderContactsList(d.contacts || []);
+  } catch (err) { $("#wfBody").innerHTML = `<div class="wf-msg">Fehler: ${esc(err)}</div>`; }
+}
+
+function renderContactsList(contacts) {
+  if (!contacts.length) { $("#wfBody").innerHTML = `<div class="wf-msg">Keine Kontakte / Relationen.</div>`; return; }
+
+  const heldByContact = {};
+  contacts.forEach(c => {
+    heldByContact[c.contactId] = new Set((c.relations || []).map(r => r.relation));
+  });
+
+  // flat list of all relations for delete wiring
+  const allRelations = [];
+
+  const rows = contacts.map((c, idx) => {
+    const available = RELATION_OPTIONS.filter(o => !(heldByContact[c.contactId] || new Set()).has(o.label));
+    const addBtnHtml = available.length
+      ? `<button class="wf-act" style="padding:3px 10px;font-size:12px;border-radius:7px" data-rel-idx="${idx}">+ Relation</button>`
+      : "";
+    const pills = (c.relations || []).map(rel => {
+      const delIdx = allRelations.length;
+      allRelations.push(rel);
+      return `<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;padding:2px 6px 2px 9px;border-radius:999px;background:#f0f1f6;color:#6b6b66;font-weight:600">
+        ${esc(rel.relation || "—")}
+        <button data-del-idx="${delIdx}" title="Relation löschen" style="display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;border:0;background:#d0d0cc;color:#fff;font-size:10px;line-height:1;cursor:pointer;padding:0;font-weight:700">×</button>
+      </span>`;
+    }).join("");
+
+    return `<div class="wf-task" style="align-items:center;gap:14px">
+      <span style="flex:1;font-weight:600">${esc(c.contactName || "—")}</span>
+      <span style="flex:none;display:flex;flex-wrap:wrap;gap:6px">${pills}</span>
+      <span class="rel-add-wrap" style="flex:none;display:flex;gap:6px;align-items:center">${addBtnHtml}</span>
+    </div>`;
+  }).join("");
+
+  $("#wfBody").innerHTML = `<div class="wf-detail">${rows}</div>`;
+
+  document.querySelectorAll("[data-rel-idx]").forEach(btn => {
+    btn.addEventListener("click", () => openRelationPicker(btn, contacts[+btn.dataset.relIdx], heldByContact));
+  });
+  document.querySelectorAll("[data-del-idx]").forEach(btn => {
+    btn.addEventListener("click", () => deleteRelation(btn, allRelations[+btn.dataset.delIdx]));
+  });
+}
+
+function openRelationPicker(triggerBtn, contact, heldByContact) {
+  const wrap = triggerBtn.closest(".rel-add-wrap");
+  const available = RELATION_OPTIONS.filter(o => !(heldByContact[contact.contactId] || new Set()).has(o.label));
+  if (!available.length) return;
+
+  wrap.innerHTML = `
+    <select id="relPicker" style="padding:4px 8px;font-size:13px;border:1px solid var(--bc-border);border-radius:8px;background:#fff">
+      ${available.map(o => `<option value="${esc(o.code)}">${esc(o.label)}</option>`).join("")}
+    </select>
+    <button id="relConfirm" style="padding:4px 10px;font-size:13px;font-weight:600;color:#fff;background:var(--bc-primary);border:0;border-radius:8px;cursor:pointer;margin-left:6px">Hinzufügen</button>
+    <button id="relCancel" style="padding:4px 8px;font-size:13px;border:1px solid var(--bc-border);border-radius:8px;background:#fff;cursor:pointer;margin-left:4px">✕</button>`;
+
+  document.getElementById("relCancel").addEventListener("click", () => showContacts());
+  document.getElementById("relConfirm").addEventListener("click", async () => {
+    const code = document.getElementById("relPicker").value;
+    const confirmBtn = document.getElementById("relConfirm");
+    confirmBtn.disabled = true; confirmBtn.textContent = "…";
+    try {
+      const res = await fetch("/api/contact-add-relation", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cid: matter.cid, contactId: contact.contactId, relationCode: code }),
+      });
+      const d = await res.json();
+      if (d.error) {
+        wrap.innerHTML = `<span style="color:#b3261e;font-size:12px">Fehler: ${esc(d.error)}</span>`;
+        return;
+      }
+      await new Promise(r => setTimeout(r, 600));
+      showContacts();
+    } catch (err) {
+      wrap.innerHTML = `<span style="color:#b3261e;font-size:12px">Fehler: ${esc(err)}</span>`;
+    }
+  });
+}
+
+async function deleteRelation(btn, contact) {
+  btn.disabled = true; btn.textContent = "…";
+  try {
+    const res = await fetch("/api/contact-delete-relation", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ relationId: contact.relationId, cid: matter.cid }),
+    });
+    const d = await res.json();
+    if (d.error) { btn.disabled = false; btn.textContent = "×"; alert("Fehler: " + d.error); return; }
+    await new Promise(r => setTimeout(r, 600));
+    showContacts();
+  } catch (err) { btn.disabled = false; btn.textContent = "×"; }
 }
 
 function esc(s) {

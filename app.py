@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import mimetypes
 import threading
 import time
@@ -370,6 +371,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_risk_profile(body)
         if parsed.path == "/api/customer-processes":
             return self._handle_customer_processes(body)
+        if parsed.path == "/api/contacts":
+            return self._handle_contacts(body)
+        if parsed.path == "/api/contact-add-relation":
+            return self._handle_contact_add_relation(body)
+        if parsed.path == "/api/contact-delete-relation":
+            return self._handle_contact_delete_relation(body)
         self._send_json({"error": "not found"}, 404)
 
     # ── Zugangsdaten (workspace .env credential editor) ──────────────
@@ -756,6 +763,85 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             return self._send_json({"error": str(exc)}, 500)
 
+    def _handle_contacts(self, body: dict):
+        """List relations for a customer via GET /api/relations.
+
+        Each item maps to: contactId, contactName, relationId (id), relation (relationType).
+        """
+        cid = (body.get("cid") or "").strip()
+        if not cid:
+            return self._send_json({"error": "cid required"}, 400)
+
+        role_map = {
+            "9010": "Legal Rep", "9030": "UBO", "9060": "Acting Person",
+            "3010": "Owner", "1520": "Managing Director",
+            "3040": "Shareholder", "3050": "Shareholder",
+        }
+
+        try:
+            with _client_lock:
+                raw = _client.list_relations(cid)
+
+            logging.getLogger("betterco").info(
+                "list_relations raw (%d items): %s", len(raw),
+                [{k: item.get(k) for k in ("id", "contactId", "contactName", "relationType")} for item in raw]
+            )
+
+            grouped = {}
+            for item in raw:
+                rel_code = str(item.get("relationType") or "")
+                contact_id = item.get("contactId") or ""
+                contact_name = (item.get("contactName") or item.get("name") or "").strip()
+                key = contact_name or contact_id
+                if key not in grouped:
+                    grouped[key] = {
+                        "contactId": contact_id,
+                        "contactName": contact_name,
+                        "relations": [],
+                    }
+                grouped[key]["relations"].append({
+                    "relationId": item.get("id"),
+                    "relation": role_map.get(rel_code, rel_code),
+                    "relationCode": rel_code,
+                })
+
+            result = list(grouped.values())
+            logging.getLogger("betterco").info(
+                "grouped contacts (%d): %s",
+                len(result),
+                [{"contactName": c["contactName"], "relationCount": len(c["relations"])} for c in result]
+            )
+            return self._send_json({"cid": cid, "contacts": result})
+        except Exception as exc:  # noqa: BLE001
+            return self._send_json({"error": str(exc)}, 500)
+
+    def _handle_contact_add_relation(self, body: dict):
+        """RelationController.addRelation — add a role/relation to one contact."""
+        cid = (body.get("cid") or "").strip()
+        contact_id = (body.get("contactId") or "").strip()
+        relation_code = (body.get("relationCode") or "").strip()
+        if not (cid and contact_id and relation_code):
+            return self._send_json({"error": "cid, contactId, relationCode required"}, 400)
+        try:
+            with _client_lock:
+                result = _client.add_contact_relation(cid, contact_id, relation_code)
+            return self._send_json({"ok": True, "result": result})
+        except Exception as exc:  # noqa: BLE001
+            return self._send_json({"error": str(exc)}, 500)
+
+    def _handle_contact_delete_relation(self, body: dict):
+        """RelationController — delete a relation by ID via DELETE /api/relations/{id}."""
+        relation_id = (body.get("relationId") or "").strip()
+        cid = (body.get("cid") or "").strip()
+        if not relation_id or not cid:
+            return self._send_json({"error": "relationId and cid required"}, 400)
+        try:
+            with _client_lock:
+                _client.delete_relation(relation_id, cid)
+            return self._send_json({"ok": True})
+        except Exception as exc:  # noqa: BLE001
+            return self._send_json({"error": str(exc)}, 500)
+
     def _handle_search(self, qs: dict):
         query = (qs.get("q") or [""])[0].strip()
         domain = (qs.get("domain") or ["ENTITY"])[0].strip() or "ENTITY"
@@ -793,6 +879,11 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     global _client, _org_id, _env_file, _status
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
     ap = argparse.ArgumentParser(description="BetterCo PoC search widget server")
     ap.add_argument("--env-file", default="workspaces/editor-betterco-claude.env",
                     help="Workspace .env to authenticate with")

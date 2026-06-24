@@ -4,6 +4,7 @@ import os
 import time
 import hashlib
 import logging
+import datetime
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
@@ -382,6 +383,84 @@ class BetterCoClient:
         r = self.session.get(contact_url)
         r.raise_for_status()
         return r.json()
+
+    def list_relations(self, cid: str) -> list:
+        """List all active relations for a customer via GET /api/relations (KYC contacts view)."""
+        company_id = self.get_entity_actor_id(cid)
+        params = {
+            "workspaceId": self.workspace_id,
+            "resourceId": cid,
+            "companyId": company_id,
+            "page": 0,
+            "step": 200,
+            "sortField": "contactName",
+            "sortOrder": "ASC",
+            "types": "",
+            "from": "",
+            "to": "",
+            "relationsTypes": "",
+            "statuses": "",
+            "relationStatuses": "",
+            "createdBy": "",
+            "isCurrent": True,
+            "statusTypes": "",
+            "searchQuery": "",
+        }
+        log.info("GET %s/api/relations params=%s", self.base_url, params)
+        r = requests.get(
+            f"{self.base_url}/api/relations",
+            headers=self._user_headers(),
+            params=params,
+            verify=self.session.verify,
+        )
+        log.info("GET /api/relations -> %d %s", r.status_code, r.text[:300])
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, dict):
+            return data.get("results") or data.get("content") or data.get("relations") or []
+        return data if isinstance(data, list) else []
+
+    def delete_relation(self, relation_id: str, cid: str) -> int:
+        """Delete a relation by ID via DELETE /api/relations/{id}."""
+        company_id = self.get_entity_actor_id(cid)
+        r = requests.delete(
+            f"{self.base_url}/api/relations/{relation_id}",
+            headers=self._user_headers(),
+            params={"companyId": company_id},
+            verify=self.session.verify,
+        )
+        if r.status_code >= 400:
+            log.error("delete_relation failed (%d): %s", r.status_code, r.text[:400])
+        r.raise_for_status()
+        return r.status_code
+
+    def add_contact_relation(self, cid: str, contact_id: str, relation_code: str) -> dict:
+        company_id = self.get_entity_actor_id(cid)
+        body = {
+            "contactId": contact_id,
+            "resourceId": cid,
+            "relationType": relation_code,
+            "relationCategoryId": "1150",
+            "relationTypeId": relation_code,
+            "title": "",
+            "relationStatus": {
+                "statusType": "ACTIVE",
+                "isCurrent": True,
+                "current": True,
+                "statusDate": datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            },
+        }
+        r = requests.put(
+            f"{self.base_url}/api/relations",
+            headers=self._user_headers(),
+            params={"companyId": company_id, "contactId": contact_id},
+            json=body,
+            verify=self.session.verify,
+        )
+        if r.status_code >= 400:
+            log.error("add_contact_relation failed (%d): %s", r.status_code, r.text[:400])
+        r.raise_for_status()
+        return r.json() if r.text else {}
 
     def get_process(self, cid: str, case_id: str, pid: str) -> dict:
         self._ensure_auth()
