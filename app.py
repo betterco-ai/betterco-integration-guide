@@ -98,6 +98,173 @@ ENTITY_FLOWS = ["F1800_OnboardingEntity_A", "F1800_OnboardingEntity_E",
 PERSON_FLOWS = ["F1900_OnboardingIndividual_A", "F1900_OnboardingIndividual_E",
                 "F19000_ReKYC", "F1600_RiskAMLScreening"]
 
+# ── Risiko-Evaluation (F1400) — full P1444 + P1448 question set (FlowBuilder spec) ──
+# The risk pages bind to PROCESS-SCOPED containers on an F1400_RiskEvaluation process
+# (NOT the bare actor). Verified contract (2026-06-26):
+#   READ  GET /api/client/onboarding/full-data?businessRelationId&processId={F1400}
+#         &sortingStrategy=COMPLIANCE — processId MANDATORY; else riskProfile/
+#         riskContainer read back null.
+#   WRITE submit_step(cid, f1400_pid, stepId, values) — the runner's per-step save.
+#         The generic bulk update_full_data 200s but SILENTLY DROPS riskProfile/
+#         riskContainer (only additionalActorData.* round-trips there).
+# Each answer also derives a secondary "RISK flag" into additionalActorData — computed
+# here exactly as the spec's bindingFields do (yes->HIGH, geography/industry maps, …).
+RISK_FLOW = "F1400_RiskEvaluation"
+RISK_STEP_HIGH = "P1444_riskEval2"        # P1444 — internal/PEP/country/complex risk
+RISK_STEP_TAX = "P1448_riskEval3_Tax"     # P1448 — services/activities/industry/geo/anomalies
+
+
+def _opt(*pairs):
+    return [{"v": v, "l": l} for v, l in pairs]
+
+
+def _hl(b):
+    return "HIGH" if b else "LOW"
+
+
+def _level_max(*levels):
+    order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+    best = max((order.get(x, 0) for x in levels), default=0)
+    return ["LOW", "MEDIUM", "HIGH"][best]
+
+
+# tax_geography enum -> risk level (P1448 bindingFields)
+RISK_GEO_LEVEL = {"DOMESTIC": "LOW", "EU_EEA": "LOW",
+                  "AML_THIRD_COUNTRIES": "MEDIUM", "HIGH_RISK_STATES": "HIGH"}
+# taxIndustry code -> risk level (P1448 tax_industry* bindingFields; same map both variants)
+RISK_INDUSTRY_LEVEL = {
+    **{f"TAX_INDUSTRY_{n}": "LOW" for n in ("00", "01", "02", "03", "05", "06")},
+    **{f"TAX_INDUSTRY_{n}": "MEDIUM" for n in ("04", "07", "08", "12", "15")},
+    **{f"TAX_INDUSTRY_{n}": "HIGH" for n in
+       ("09", "10", "11", "13", "14", "16", "17", "18", "19", "20",
+        "21", "22", "23", "24")},
+    "TAX_INDUSTRY_CASH": "HIGH",
+}
+# Option sets
+GEO_OPTS = _opt(("DOMESTIC", "ausschließlich inländische Kunden"),
+                ("EU_EEA", "Mitgliedsstaaten der EU und des EWR"),
+                ("AML_THIRD_COUNTRIES", "Drittstaaten mit gut funktionierender Gw-Prävention"),
+                ("HIGH_RISK_STATES", "Hochrisiko-Staaten ohne angemessene Standards"))
+RESERVATION_OPTS = _opt(
+    ("TAX_TASK_RESERVATION_01", "Finanzbuchhaltung"),
+    ("TAX_TASK_RESERVATION_02", "Lohnbuchhaltung"),
+    ("TAX_TASK_RESERVATION_03", "Jahresabschlussarbeiten"),
+    ("TAX_TASK_RESERVATION_04", "Steuererklärungen"),
+    ("TAX_TASK_RESERVATION_05", "Testamentsvollstreckung"),
+    ("TAX_TASK_RESERVATION_06", "Verfahrensdokumentation"),
+    ("TAX_TASK_RESERVATION_99", "Andere Dienstleistungen"))
+AGREED_OPTS = _opt(
+    ("TAX_TASK_AGREED_01", "Vermögensverwaltende Tätigkeit"),
+    ("TAX_TASK_AGREED_02", "Treuhänderische Dienstleistungen"),
+    ("TAX_TASK_AGREED_03", "Betriebswirtschaftliche Beratung/Wirtschaftsberatung"),
+    ("TAX_TASK_AGREED_04", "IT-Beratung"),
+    ("TAX_TASK_AGREED_05", "Finanz- und Immobilientransaktionen im Namen des Kunden"),
+    ("TAX_TASK_AGREED_06", "Mitwirkung bei Planung/Durchführung von Geschäften des Kunden"),
+    ("TAX_TASK_AGREED_07", "weitere Dienstleistungen"))
+AGREED06_OPTS = _opt(
+    ("TAX_TASK_AGREED_06.01", "Kauf/Verkauf von Immobilien oder Gewerbebetrieben"),
+    ("TAX_TASK_AGREED_06.02", "Verwaltung von Geld, Wertpapieren oder Vermögenswerten"),
+    ("TAX_TASK_AGREED_06.03", "Eröffnung/Verwaltung von Bank-, Spar- oder Wertpapierkonten"),
+    ("TAX_TASK_AGREED_06.04", "Beschaffung von Mitteln zur Gründung/Verwaltung von Gesellschaften"),
+    ("TAX_TASK_AGREED_06.05", "Gründung/Verwaltung von Treuhand-/Gesellschaftsstrukturen"),
+    ("TAX_TASK_AGREED_06.99", "Sonstige"))
+AGREED07_OPTS = _opt(
+    ("TAX_TASK_AGREED_07.01", "Gründung von juristischen Personen/Personengesellschaften"),
+    ("TAX_TASK_AGREED_07.02", "Ausübung von Leitungs-/Geschäftsführungsfunktion"),
+    ("TAX_TASK_AGREED_07.03", "Bereitstellung Sitz/Geschäfts-/Verwaltungsdienstleistungen"),
+    ("TAX_TASK_AGREED_07.04", "Treuhänder für eine Rechtsgestaltung (§ 3 Abs. 3 GwG)"),
+    ("TAX_TASK_AGREED_07.05", "Nomineller Anteilseigner für eine andere Person"),
+    ("TAX_TASK_AGREED_07.06", "Ermöglichen, dass andere Personen o.g. Funktionen ausüben"),
+    ("TAX_TASK_AGREED_07.99", "Sonstige"))
+INDUSTRY_INDIVIDUAL_OPTS = _opt(
+    ("TAX_INDUSTRY_00", "-"),
+    ("TAX_INDUSTRY_01", "Freiberufler (Ärzte, Rechtsanwälte, Architekten)"),
+    ("TAX_INDUSTRY_02", "Angestellte, Rentner, Student"))
+INDUSTRY_BUSINESS_OPTS = _opt(
+    ("TAX_INDUSTRY_00", "-"), ("TAX_INDUSTRY_03", "Handwerker"),
+    ("TAX_INDUSTRY_04", "Einzelhandel"), ("TAX_INDUSTRY_05", "Produzierendes Gewerbe"),
+    ("TAX_INDUSTRY_06", "Börsennotierte Unternehmen"), ("TAX_INDUSTRY_07", "Import-/Exportbetrieb"),
+    ("TAX_INDUSTRY_08", "Baugewerbe, Bauträger"), ("TAX_INDUSTRY_09", "Immobilienhandel, -makler"),
+    ("TAX_INDUSTRY_10", "Handel mit teurer Kunst/Antiquitäten"),
+    ("TAX_INDUSTRY_11", "Handel mit Edelmetallen/Edelsteinen"), ("TAX_INDUSTRY_12", "KfZ-Händler"),
+    ("TAX_INDUSTRY_13", "Boots- und Yachthändler"), ("TAX_INDUSTRY_14", "Juweliere"),
+    ("TAX_INDUSTRY_15", "Hotellerie, Gastronomie"), ("TAX_INDUSTRY_16", "Glücksspiel/Online-Gaming"),
+    ("TAX_INDUSTRY_17", "Pornografie / Erwachsenenunterhaltung"),
+    ("TAX_INDUSTRY_18", "Herstellung/Handel mit Waffen und Munition"),
+    ("TAX_INDUSTRY_19", "Abholzung/Verbrennung natürlicher Ökosysteme"),
+    ("TAX_INDUSTRY_20", "kontroverse Kreditvereinbarungen / Raubkredite"),
+    ("TAX_INDUSTRY_21", "Ponzi-Schemata / betrügerische Anlageprogramme"),
+    ("TAX_INDUSTRY_22", "Menschenhandel und Ausbeutung"),
+    ("TAX_INDUSTRY_23", "Kryptowährungen (außer Whitelist)"),
+    ("TAX_INDUSTRY_24", "Spirituosen, Tabak, E-Zigaretten, Cannabis / illegale Substanzen"),
+    ("TAX_INDUSTRY_CASH", "Bargeldintensives Geschäft"))
+ANOMALIES_OPTS = _opt(
+    ("TAX_ANOMALIES_01", "Vermeidung persönlichen Kontakts ohne guten Grund"),
+    ("TAX_ANOMALIES_02", "Forderung nach besonderer Diskretion oder Anonymität"),
+    ("TAX_ANOMALIES_03", "Einschalten von Dritten (Strohmanngeschäfte)"),
+    ("TAX_ANOMALIES_04", "Verwendung von Briefkastenfirmen"),
+    ("TAX_ANOMALIES_05", "wirtschaftlich zweifelhafte/unsinnige Gestaltungen"),
+    ("TAX_ANOMALIES_06", "Nummernkonten zur Abwicklung von Transaktionen"),
+    ("TAX_ANOMALIES_07", "Verweigerung der Vorlage"), ("TAX_ANOMALIES_99", "Sonstige"))
+
+
+def _risk_schema(entity_type: str) -> list:
+    """The question schema sent to the UI, tailored to the entity type.
+
+    Each question: key, step, section, type (yesno|yesno_manual|select|multi|text),
+    label, options?, show? (visibility against current answers/entityType), auto? (the
+    read-only auto-derived twin path for PEP/country)."""
+    is_indiv = str(entity_type or "").upper() == "INDIVIDUAL"
+    return [
+        # ── P1444_riskEval2 ──
+        {"key": "riskHigh_01", "step": "P1444", "section": "Interne Risiko-Analyse",
+         "type": "yesno",
+         "label": "Besteht aufgrund der unternehmensinternen Risiko-Analyse bzw. einer "
+                  "Einzelfallprüfung ein erhöhtes Risiko?"},
+        {"key": "pep", "step": "P1444", "section": "Politisch exponierte Person",
+         "type": "yesno_manual", "auto": True,
+         "label": "Ist der Vertragspartner oder wirtschaftlich Berechtigte eine politisch "
+                  "exponierte Person, ein Familienmitglied oder nahestehende Person?"},
+        {"key": "country", "step": "P1444", "section": "Länderrisiko",
+         "type": "yesno_manual", "auto": True,
+         "label": "Ist der Vertragspartner oder wirtschaftlich Berechtigte in einem "
+                  "Drittstaat mit hohem Risiko niedergelassen?"},
+        {"key": "riskHigh_04", "step": "P1444", "section": "Komplexe/ungewöhnliche Transaktion",
+         "type": "yesno",
+         "label": "Ist die Transaktion besonders komplex oder groß, läuft ungewöhnlich ab "
+                  "oder hat keinen offensichtlichen wirtschaftlichen/rechtmäßigen Zweck?"},
+        # ── P1448_riskEval3_Tax ──
+        {"key": "tax_task_reservation", "step": "P1448", "section": "Leistungen",
+         "type": "multi", "options": RESERVATION_OPTS,
+         "label": "An welchen unserer Leistungen besteht Interesse?"},
+        {"key": "tax_task_reservationOther", "step": "P1448", "section": "Leistungen",
+         "type": "text", "label": "Bitte beschreibe dein Interesse",
+         "show": {"key": "tax_task_reservation", "includes": "TAX_TASK_RESERVATION_99"}},
+        {"key": "tax_task_agreed", "step": "P1448", "section": "Weitere Tätigkeiten",
+         "type": "multi", "options": AGREED_OPTS,
+         "label": "Weitere vereinbarte Tätigkeiten"},
+        {"key": "tax_task_agreed_06", "step": "P1448", "section": "Weitere Tätigkeiten",
+         "type": "select", "options": AGREED06_OPTS,
+         "label": "Mitwirkung bei Geschäften des Mandanten — bitte detaillieren",
+         "show": {"key": "tax_task_agreed", "includes": "TAX_TASK_AGREED_06"}},
+        {"key": "tax_task_agreed_07", "step": "P1448", "section": "Weitere Tätigkeiten",
+         "type": "select", "options": AGREED07_OPTS,
+         "label": "Weitere Dienstleistungen — bitte detaillieren",
+         "show": {"key": "tax_task_agreed", "includes": "TAX_TASK_AGREED_07"}},
+        {"key": "tax_industry", "step": "P1448", "section": "Risiko-Branche",
+         "type": "select",
+         "options": INDUSTRY_INDIVIDUAL_OPTS if is_indiv else INDUSTRY_BUSINESS_OPTS,
+         "label": "Wähle die zutreffende Branche aus"},
+        {"key": "tax_geography", "step": "P1448", "section": "Geographische Tätigkeit",
+         "type": "select", "options": GEO_OPTS, "show": {"entity": "business"},
+         "label": "Geographisches Umfeld der Geschäftstätigkeit"},
+        {"key": "has_tax_anomalies", "step": "P1448", "section": "Besondere Auffälligkeiten",
+         "type": "yesno", "label": "Bestehen besondere Auffälligkeiten bei dem Mandanten?"},
+        {"key": "tax_anomalies", "step": "P1448", "section": "Besondere Auffälligkeiten",
+         "type": "multi", "options": ANOMALIES_OPTS, "label": "Auffälligkeiten auswählen",
+         "show": {"key": "has_tax_anomalies", "equals": True}},
+    ]
+
 _client = None          # set in main()
 _org_id = None          # advisor org id (from the workspace env) — set in main()
 _env_file = None        # path of the active workspace .env — set in main()/on save
@@ -182,6 +349,164 @@ def _risk_fields_rest(cu: dict) -> dict:
         "countryRisk": f("riskCountry"),
         "amlRisk": f("aggregatedAmlRisk"),
     }
+
+
+def _datev_id(cu: dict) -> str:
+    """DATEV external ID(s) of a REST customer — externalIdentifiers where system=DATEV.
+
+    Shape per entry: {"externalId": "<connector-uuid>-<datevNumber>", "system": "DATEV"},
+    e.g. "692e6898-…-647d4ed6c87f-29646". The DATEV consultant/client number is the
+    suffix after the last dash (29646); the overview's DATEV filter substring-matches the
+    whole string, so typing just those trailing digits finds the client.
+    """
+    ids = [e.get("externalId") for e in (cu.get("externalIdentifiers") or [])
+           if str(e.get("system", "")).upper() == "DATEV" and e.get("externalId")]
+    return ", ".join(ids)
+
+
+def _find_risk_process(cid: str):
+    """Locate a non-CLOSED F1400_RiskEvaluation process for a customer.
+
+    Returns (case_id, pid) — pid is None if no open F1400 exists yet (case_id is
+    still returned so the caller can create one). Call inside _client_lock.
+    """
+    cases = _as_list(_client.list_cases(cid))
+    case_id = cases[0].get("id") if cases else None
+    for cs in cases:
+        cs_id = cs.get("id")
+        for p in _as_list(_client.list_processes(cid, cs_id)):
+            try:
+                d = _client.get_process(cid, cs_id, p.get("id"))
+            except Exception:  # noqa: BLE001
+                continue
+            if d.get("name") == RISK_FLOW and str(d.get("status", "")).upper() != "CLOSED":
+                return cs_id, p.get("id")
+    return case_id, None
+
+
+def _risk_full_data(cid: str, pid: str) -> dict:
+    """Read full-data WITH the F1400 processId — required for riskProfile/riskContainer
+    to be populated (they are process-scoped). Mirrors the flow's getUrl."""
+    r = requests.get(
+        _client.base_url + "/api/client/onboarding/full-data",
+        headers=_client._user_headers(), verify=_client.session.verify,
+        params={"businessRelationId": cid, "processId": pid,
+                "sortingStrategy": "COMPLIANCE",
+                "roleTypes": ["UBO_CURRENT", "LEGAL_REP_CURRENT", "ACTING_PERSON"],
+                "limit": 50})
+    r.raise_for_status()
+    return r.json()
+
+
+def _risk_read_answers(fd: dict) -> dict:
+    """Read all P1444+P1448 answers + auto twins + derived flags from F1400 full-data."""
+    rc = fd.get("riskContainer") or {}
+    ra = (rc.get("riskAnswers") or {}).get("HIGH") or {}
+    rm = (rc.get("manualRiskAnswers") or {}).get("HIGH") or {}
+    rp = fd.get("riskProfile") or {}
+    aad = fd.get("additionalActorData") or {}
+    return {
+        "answers": {
+            "riskHigh_01": ra.get("riskHigh_01"),
+            "pep": rm.get("isAnyPep"),
+            "country": rm.get("highRiskThirdCountry"),
+            "riskHigh_04": ra.get("riskHigh_04"),
+            "tax_task_reservation": rp.get("taskReservation") or [],
+            "tax_task_reservationOther": aad.get("tax_task_reservationOther"),
+            "tax_task_agreed": rp.get("agreedActivities") or [],
+            "tax_task_agreed_06": rp.get("clientTransactions"),
+            "tax_task_agreed_07": rp.get("otherServices"),
+            "tax_industry": rp.get("taxIndustry"),
+            "tax_geography": rp.get("taxGeography"),
+            "has_tax_anomalies": aad.get("has_tax_anomalies"),
+            "tax_anomalies": rp.get("taxAnomaliesList") or [],
+        },
+        "auto": {  # read-only auto-derived twins shown next to the PEP/country answers
+            "pep": ra.get("isAnyPep"),
+            "country": ra.get("highRiskThirdCountry"),
+        },
+        "flags": {k: aad.get(k) for k in (
+            "riskFlag_High_01", "riskFlag_High_02", "riskFlag_High_03", "riskFlag_High_04",
+            "risk_task_reservation", "risk_task_agreed", "risk_tax_industry",
+            "risk_tax_geography", "risk_tax_anomalies", "risk_tax")},
+    }
+
+
+def _risk_agreed_level(agreed, t06, t07) -> str:
+    """risk_task_agreed: LOW unless a MEDIUM-weighted activity/detail is selected
+    (spec: 01/02/03/05 or any 06.xx or 07.02..07.99 -> MEDIUM; 04 alone -> LOW)."""
+    agreed = agreed or []
+    if any(a in agreed for a in ("TAX_TASK_AGREED_01", "TAX_TASK_AGREED_02",
+                                 "TAX_TASK_AGREED_03", "TAX_TASK_AGREED_05")):
+        return "MEDIUM"
+    if t06 and t06 != "TAX_TASK_AGREED_06.00":
+        return "MEDIUM"
+    if t07 and t07 not in ("TAX_TASK_AGREED_07.00", "TAX_TASK_AGREED_07.01"):
+        return "MEDIUM"
+    return "LOW"
+
+
+def _risk_build(ans: dict):
+    """Build the two submit_step bodies (P1444, P1448) from a UI answers dict, computing
+    every derived RISK flag as the spec's bindingFields do. Returns (p1444, p1448, flags).
+    Only answered fields are written (None = leave untouched)."""
+    g = ans.get
+    answers_high, manual_high, aad44 = {}, {}, {}
+    if g("riskHigh_01") is not None:
+        answers_high["riskHigh_01"] = bool(g("riskHigh_01")); aad44["riskFlag_High_01"] = _hl(g("riskHigh_01"))
+    if g("pep") is not None:
+        manual_high["isAnyPep"] = bool(g("pep")); aad44["riskFlag_High_02"] = _hl(g("pep"))
+    if g("country") is not None:
+        manual_high["highRiskThirdCountry"] = bool(g("country")); aad44["riskFlag_High_03"] = _hl(g("country"))
+    if g("riskHigh_04") is not None:
+        answers_high["riskHigh_04"] = bool(g("riskHigh_04")); aad44["riskFlag_High_04"] = _hl(g("riskHigh_04"))
+    rc = {}
+    if answers_high:
+        rc["riskAnswers"] = {"HIGH": answers_high}
+    if manual_high:
+        rc["manualRiskAnswers"] = {"HIGH": manual_high}
+    p1444 = {}
+    if rc:
+        p1444["riskContainer"] = rc
+    if aad44:
+        p1444["additionalActorData"] = aad44
+
+    rp, aad48 = {}, {}
+    if g("tax_task_reservation") is not None:
+        rp["taskReservation"] = list(g("tax_task_reservation") or [])
+        aad48["risk_task_reservation"] = "LOW"
+    if g("tax_task_reservationOther") is not None:
+        aad48["tax_task_reservationOther"] = g("tax_task_reservationOther")
+    agreed, t06, t07 = g("tax_task_agreed"), g("tax_task_agreed_06"), g("tax_task_agreed_07")
+    if agreed is not None:
+        rp["agreedActivities"] = list(agreed or [])
+    if t06:
+        rp["clientTransactions"] = t06
+    if t07:
+        rp["otherServices"] = t07
+    if agreed is not None or t06 or t07:
+        aad48["risk_task_agreed"] = _risk_agreed_level(agreed, t06, t07)
+    if g("tax_industry"):
+        rp["taxIndustry"] = g("tax_industry")
+        aad48["risk_tax_industry"] = RISK_INDUSTRY_LEVEL.get(g("tax_industry"), "LOW")
+    if g("tax_geography"):
+        rp["taxGeography"] = g("tax_geography")
+        aad48["risk_tax_geography"] = RISK_GEO_LEVEL.get(g("tax_geography"), "LOW")
+    if g("has_tax_anomalies") is not None:
+        aad48["has_tax_anomalies"] = bool(g("has_tax_anomalies"))
+        aad48["risk_tax_anomalies"] = _hl(g("has_tax_anomalies"))
+    if g("tax_anomalies") is not None:
+        rp["taxAnomaliesList"] = list(g("tax_anomalies") or [])
+    comp = [aad48[k] for k in ("risk_task_reservation", "risk_task_agreed", "risk_tax_industry",
+            "risk_tax_geography", "risk_tax_anomalies") if k in aad48]
+    if comp:
+        aad48["risk_tax"] = _level_max(*comp)
+    p1448 = {}
+    if rp:
+        p1448["riskProfile"] = rp
+    if aad48:
+        p1448["additionalActorData"] = aad48
+    return p1444, p1448, {**aad44, **aad48}
 
 
 def _doc_meta(d: dict) -> dict:
@@ -387,6 +712,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_process_documents(body)
         if parsed.path == "/api/customers-list":
             return self._handle_customers_list(body)
+        if parsed.path == "/api/risk-eval":
+            return self._handle_risk_eval(body)
+        if parsed.path == "/api/risk-eval-save":
+            return self._handle_risk_eval_save(body)
         if parsed.path == "/api/risk-profile":
             return self._handle_risk_profile(body)
         if parsed.path == "/api/customer-processes":
@@ -585,6 +914,7 @@ class Handler(BaseHTTPRequestHandler):
                     "id": cid,
                     "name": (cu.get("legalInfo") or {}).get("legalName") or dn,
                     "type": cu.get("type"),   # INDIVIDUAL = Person, else Unternehmen
+                    "datevId": _datev_id(cu),  # externalIdentifiers system=DATEV
                     "kycStatus": f["kycStatus"], "wzCode": f["wzCode"],
                     "wzDescription": f["wzDescription"],
                     "taxIndustry": f["taxIndustry"], "industryRisk": f["industryRisk"],
@@ -598,6 +928,57 @@ class Handler(BaseHTTPRequestHandler):
                 rows = list(ex.map(build, items))
             rows.sort(key=lambda r: (r.get("name") or "").lower())
             return self._send_json({"total": len(rows), "customers": rows})
+        except Exception as exc:  # noqa: BLE001
+            return self._send_json({"error": str(exc)}, 500)
+
+    def _handle_risk_eval(self, body: dict):
+        """Read the full P1444+P1448 answer set for one customer (the Risiko-Fragen tab).
+
+        Finds a non-CLOSED F1400_RiskEvaluation process and reads full-data WITH its
+        processId. Returns the question schema (tailored to the entity type) + current
+        answers + auto twins + derived flags. No F1400 yet -> hasProcess=false and the
+        process is created lazily on first save."""
+        cid = (body.get("cid") or "").strip()
+        if not cid:
+            return self._send_json({"error": "cid required"}, 400)
+        try:
+            with _client_lock:
+                _, pid = _find_risk_process(cid)
+                fd = _risk_full_data(cid, pid) if pid else {}
+            et = (fd.get("clientType") or {}).get("entityStageType")
+            data = _risk_read_answers(fd) if pid else {"answers": {}, "auto": {}, "flags": {}}
+            return self._send_json({"cid": cid, "hasProcess": bool(pid), "pid": pid,
+                                    "entityType": et, "schema": _risk_schema(et), **data})
+        except Exception as exc:  # noqa: BLE001
+            return self._send_json({"error": str(exc)}, 500)
+
+    def _handle_risk_eval_save(self, body: dict):
+        """Persist the P1444+P1448 answers via submit_step (the runner's save).
+
+        Ensures an F1400_RiskEvaluation process (creates one if missing), writes each
+        page's primary bindings + derived RISK flags, then reads back with the processId
+        and returns the fresh schema/answers/flags."""
+        cid = (body.get("cid") or "").strip()
+        if not cid:
+            return self._send_json({"error": "cid required"}, 400)
+        ans = body.get("answers") or {}
+        try:
+            p1444, p1448, _ = _risk_build(ans)
+            with _client_lock:
+                case_id, pid = _find_risk_process(cid)
+                if not pid:
+                    if not case_id:
+                        return self._send_json({"error": "Kein Case zum Anlegen des F1400-Prozesses"}, 400)
+                    pid = _client.create_process(cid, case_id, RISK_FLOW)["id"]
+                if p1444:
+                    _client.submit_step(cid, pid, RISK_STEP_HIGH, p1444)
+                if p1448:
+                    _client.submit_step(cid, pid, RISK_STEP_TAX, p1448)
+                fd = _risk_full_data(cid, pid)
+            et = (fd.get("clientType") or {}).get("entityStageType")
+            return self._send_json({"cid": cid, "pid": pid, "saved": True,
+                                    "entityType": et, "schema": _risk_schema(et),
+                                    **_risk_read_answers(fd)})
         except Exception as exc:  # noqa: BLE001
             return self._send_json({"error": str(exc)}, 500)
 
