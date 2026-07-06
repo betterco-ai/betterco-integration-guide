@@ -127,7 +127,7 @@ def _doc_download_uri(doc: dict) -> str | None:
 # --------------------------------------------------------------------------- #
 def step1_search(client: BetterCoClient, query: str, domain: str = "ENTITY") -> list[dict]:
     """PoC company search -> BetterCo returns a NorthData hit list."""
-    hits = client.search_registry(query, domain=domain)
+    hits = client.search_registry_rest(query, domain=domain)  # REST companiesSearch
     log.info("Step 1: '%s' -> %d Treffer", query, len(hits))
     for i, h in enumerate(hits[:10]):
         log.info("  [%d] %s | %s | id=%s",
@@ -173,13 +173,33 @@ def step3_create_matter(client: BetterCoClient, hit: dict, *, as_lead: bool = Fa
     off by default; the auto-enrichment already attaches HR + Gesellschafterliste.
     """
     name = hit.get("legalName") or hit.get("name")
-    result = client.create_customer_from_registry(
-        external_registry_id=hit["externalRegistryId"],
-        name=name,
-        as_lead=as_lead,
-        purchase_documents=purchase_documents,
-    )
-    cid = result["businessRelationId"]
+    domain = (hit.get("domain") or "ENTITY").upper()
+    if as_lead or purchase_documents:
+        # REST createCustomerFromExternalSource has no LEAD / purchase-documents
+        # variant — keep the User-API path when either option is set.
+        result = client.create_customer_from_registry(
+            external_registry_id=hit["externalRegistryId"], name=name,
+            as_lead=as_lead, purchase_documents=purchase_documents,
+        )
+        cid = result["businessRelationId"]
+    else:
+        # REST twin. Enrichment is async, so poll to completion (wait_enrichment
+        # is User-API — the one PENDING-REST bit) before resolving the process.
+        created = client.create_customer_from_registry_rest(
+            hit["externalRegistryId"], domain=domain, create_case=True)
+        cid = created["id"]
+        client.wait_enrichment(cid, timeout=90)
+        # REST createDefaultCase makes an EMPTY case — unlike the User-API path it
+        # does NOT auto-add the onboarding process, so create it explicitly.
+        onboarding = ("F1900_OnboardingIndividual_A"
+                      if domain in ("PERSON", "INDIVIDUAL") else ONBOARDING_FLOW)
+        cases_ = _as_list(client.list_cases(cid))
+        case_ = cases_[0]["id"] if cases_ else client.create_case(cid, name)
+        if not _as_list(client.list_processes(cid, case_)):
+            client.create_process(cid, case_, onboarding)
+        result = {"businessRelationId": cid,
+                  "contacts": _as_list(client.list_contacts(cid)),
+                  "documents": _as_list(client.list_customer_documents(cid))}
     case_id, pid = _resolve_onboarding_process(client, cid)
     log.info("Step 3: Akte angelegt — customer=%s case=%s process=%s (%.1fs, %d Kontakte, %d Dok.)",
              cid, case_id, pid, result.get("elapsed_s", 0),
@@ -251,11 +271,11 @@ def step6_completeness(client: BetterCoClient, cid: str, *,
     There is no single 'completeness' endpoint — we assemble it: master data
     present, documents present, and a screening verdict for every in-scope actor.
     """
-    fd = client.get_full_data(cid)
+    case_id, pid = _resolve_onboarding_process(client, cid)
+    fd = client.get_full_data_rest(pid)  # REST getProcessFullData (keyed by process)
     docs = _as_list(client.list_customer_documents(cid))
     # auto_screen_customer(dry_run, screen=False) resolves the already-run results
     # into auto_cleared / needs_review / skipped without committing anything.
-    case_id, _ = _resolve_onboarding_process(client, cid)
     screening_pid = _find_screening_process(client, cid, case_id)
     review = client.auto_screen_customer(
         cid, screening_pid, roles=roles, screen=False, dry_run=True
@@ -294,7 +314,8 @@ def _find_screening_process(client: BetterCoClient, cid: str, case_id: str) -> s
 def step7_fetch_information_object(client: BetterCoClient, cid: str, *,
                                    download_dir: str | None = None) -> dict:
     """Retrieve the complete information object: master data + contacts + documents."""
-    fd = client.get_full_data(cid)
+    _, pid = _resolve_onboarding_process(client, cid)
+    fd = client.get_full_data_rest(pid)  # REST getProcessFullData
     docs = _as_list(client.list_customer_documents(cid))
     log.info("Step 7: Informationsobjekt — %d Kontakte, %d Dokumente",
              len(_as_list(fd.get("contacts"))) if not isinstance(fd.get("contacts"), dict)
@@ -342,8 +363,10 @@ def step8_answer_gwg(client: BetterCoClient, cid: str, process_id: str,
     Always read back — submit_step returns 200 even when it drops unknown fields.
     """
     acks = []
+    case_id, _ = _resolve_onboarding_process(client, cid)
     for step_id, values in gwg_answers.items():
-        ack = client.submit_step(cid, process_id, step_id, values)
+        # REST updateProcessFullData (resolves taskSpec -> task instance id).
+        ack = client.submit_step_spec_rest(cid, case_id, process_id, step_id, values)
         log.info("Step 8: GwG-Antworten in %s eingearbeitet -> %s", step_id, ack)
         acks.append({"step_id": step_id, "ack": ack})
     return acks
@@ -355,11 +378,11 @@ def step8_answer_gwg(client: BetterCoClient, cid: str, process_id: str,
 def step9_risk_report(client: BetterCoClient, cid: str, *,
                       roles=SCREEN_ROLES) -> dict:
     """Assemble the Risikobericht from the risk snapshot + screening verdicts."""
-    fd = client.get_full_data(cid)
+    case_id, pid = _resolve_onboarding_process(client, cid)
+    fd = client.get_full_data_rest(pid)  # REST getProcessFullData
     aml = fd.get("amlProfile") or {}
     snapshot = fd.get("actorRiskSnapshot") or {}
 
-    case_id, _ = _resolve_onboarding_process(client, cid)
     screening_pid = _find_screening_process(client, cid, case_id)
     screening = client.auto_screen_customer(
         cid, screening_pid, roles=roles, screen=False, dry_run=True

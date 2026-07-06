@@ -198,11 +198,21 @@ Two REST-vs-User-API gotchas the live tests caught: REST `updateProcessFullData`
 `taskStatuses` body** (drives completion via the `action` query param instead), and its `taskId` param is
 the **task instance id, not the `taskSpec`** (a spec 404s) — hence the `submit_step_spec_rest` resolver.
 
+The **scripted CLI (`reference_flow.py`)** was flipped to the same twins too (steps 1/3/6/7/8/9:
+`search_registry_rest`, `create_customer_from_registry_rest`, `get_full_data_rest`,
+`submit_step_spec_rest`) and runs green end-to-end on the editor sandbox (`--no-screen --cleanup`) with
+full enrichment parity (51 contacts). One CLI-only wrinkle handled: REST `createDefaultCase` makes an
+*empty* case (the User-API create auto-added the onboarding process), so the REST branch creates the
+F1800/F1900 process explicitly. `create_customer_from_registry`'s `as_lead` / `purchase_documents`
+options have no REST externalSource variant, so those keep the User-API path.
+
 **Still on the User API (PENDING REST — this is the "wait for others to evolve" set):**
-- Relations/contacts tab (`list_relations` / `add_contact_relation`) — REST `getCustomerContacts` exists but
-  the shape differs (⚠️ §1 row 16); a rework, not a swap.
-- AML screening (§2.2–2.4) — no REST trigger/read-results/decision endpoints.
-- Enrichment-completion poll (§2.1) — optional; REST create already returns enriched.
+- Relations/contacts tab (`list_relations` / `add_contact_relation` / `delete_relation`) — REST
+  `getCustomerContacts` exists but the shape differs (⚠️ §1 row 16); a rework, not a swap. (`create_contact`
+  in the same tab is already REST.)
+- AML screening (`run_screening` / `get_screening_matches` / `auto_screen_customer`, CLI-only) — §2.2–2.4,
+  no REST trigger/read-results/decision endpoints.
+- Enrichment-completion poll (§2.1) — needed for *full* enrichment (async); optional, no REST signal yet.
 
 > ⚠️ **Vendored-client re-sync:** the `*_rest` methods were added to `betterco_client.py` **in this repo**.
 > Its source of truth is the `betterco_claude_api` repo — port them back on the next sync (grep for the
