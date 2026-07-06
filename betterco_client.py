@@ -1366,6 +1366,54 @@ class BetterCoClient:
         r.raise_for_status()
         return r.json() if r.text else {}
 
+    # ── REST twins (User-API → REST migration) ──────────────────────
+    # NOTE: the four *_rest methods below were added in the integration-guide
+    # repo as part of the User-API→REST migration (see REST_MAPPING.md). They
+    # must be PORTED BACK to the betterco_claude_api source repo on next sync.
+    # They use the REST scope (self.session / api-key token), so they work with
+    # key+secret alone — no email/password. Only the AML screening + enrichment
+    # poll still require the User API ("wait for others to evolve").
+
+    def submit_step_rest(self, process_id: str, step_id: str, values: dict,
+                         *, action: str = "COMPLETE") -> dict:
+        """REST twin of submit_step: persist a flow step via
+        PATCH /restapi/v1/.../processes/{pid}/full-data?taskId=<stepId>&action=
+        (operationId updateProcessFullData). Keyed by process_id (REST has no
+        businessRelationId param).
+
+        Unlike the User-API endpoint, the REST body is PURE FullData — task
+        completion is driven by the query params, NOT a `taskStatuses` entry in
+        the body (which REST rejects: 400 "Invalid fields: ['taskStatuses']").
+        `action` marks the task state (COMPLETE by default; OPEN/SKIP to save
+        without completing). The `values` FullData containers
+        (additionalProcessData.<topic>, additionalActorData, entityLegalInfo …)
+        are identical to the User-API endpoint."""
+        self._ensure_auth()
+        params = {"taskId": step_id, "action": action}
+        r = self.session.patch(
+            self._url(f"/processes/{process_id}/full-data"),
+            params=params, json=dict(values),
+        )
+        if r.status_code >= 400:
+            log.error("submit_step_rest failed (%d): %s", r.status_code, r.text[:300])
+        r.raise_for_status()
+        return r.json() if r.text else {}
+
+    def submit_step_spec_rest(self, cid: str, case_id: str, process_id: str,
+                              task_spec: str, values: dict,
+                              *, action: str = "COMPLETE") -> dict:
+        """submit_step_rest convenience: accepts a taskSpec (e.g.
+        'P1444_riskStep') like the User-API submit_step did, resolves it to the
+        task INSTANCE id via get_process (REST taskId wants the instance id, not
+        the spec — a spec 404s 'Task Not Found'), then submits. Raises KeyError
+        if the spec isn't a task of the process."""
+        det = self.get_process(cid, case_id, process_id)
+        task_id = next((t.get("id") for t in (det.get("tasks") or [])
+                        if t.get("taskSpec") == task_spec), None)
+        if not task_id:
+            raise KeyError(f"taskSpec {task_spec!r} not found on process {process_id}")
+        return self.submit_step_rest(process_id, task_id, values, action=action)
+
     # ── Safe bulk full-data update (no step side effects) ───────────
 
     # Fields that must NEVER appear in a bulk full-data PATCH — they corrupt the
@@ -1551,6 +1599,17 @@ class BetterCoClient:
             },
             verify=self.session.verify,
         )
+        r.raise_for_status()
+        return r.json()
+
+    def get_full_data_rest(self, process_id: str, data_scopes: list = None) -> dict:
+        """REST twin of get_full_data: GET /restapi/v1/.../processes/{pid}/full-data
+        (operationId getProcessFullData). Keyed by process_id, not
+        businessRelationId. Returns the same FullData object (a superset —
+        entityLegalInfo / additionalProcessData / currentProcessName also present)."""
+        self._ensure_auth()
+        params = {"dataScopes": data_scopes} if data_scopes else None
+        r = self.session.get(self._url(f"/processes/{process_id}/full-data"), params=params)
         r.raise_for_status()
         return r.json()
 
@@ -3344,6 +3403,87 @@ class BetterCoClient:
             "elapsed_s": round(elapsed, 1),
             **data,
         }
+
+    # ── REST twins for registry search + create (see re-sync note above) ──
+
+    @staticmethod
+    def _normalize_registry_hit(h: dict, domain: str) -> dict:
+        """Map a REST ClientSearchResponse hit to the User-API search_registry
+        shape the app consumes (legalName / domain / legalType-as-string)."""
+        lt = h.get("legalType")
+        if isinstance(lt, dict):
+            lt = lt.get("typeDe") or lt.get("typeEn") or lt.get("id")
+        out = dict(h)
+        out["legalName"] = h.get("displayName") or h.get("legalName")
+        out["domain"] = h.get("type") or h.get("domain") or domain
+        out["legalType"] = lt
+        return out
+
+    def search_registry_rest(self, query: str, domain: str = "ENTITY") -> list:
+        """REST twin of search_registry: GET /restapi/v1/search/customers
+        (operationId companiesSearch). Despite the name it is the external
+        NorthData-style registry lookup — hits carry externalRegistryId +
+        register metadata. Maps internal domain PERSON -> REST type INDIVIDUAL,
+        then normalizes each hit back to the User-API shape."""
+        self._ensure_auth()
+        rest_type = "INDIVIDUAL" if domain.upper() in ("PERSON", "INDIVIDUAL") else "ENTITY"
+        r = self.session.get(
+            f"{self.base_url}/restapi/v1/search/customers",
+            params={"query": query, "type": rest_type},
+        )
+        r.raise_for_status()
+        hits = r.json() or []
+        return [self._normalize_registry_hit(h, domain) for h in hits]
+
+    def create_customer_from_registry_rest(self, external_registry_id: str,
+                                           domain: str = "ENTITY",
+                                           create_case: bool = True,
+                                           relation_type: str = None) -> dict:
+        """REST twin of create_customer_from_registry: POST
+        /restapi/v1/.../customers/externalSource (operationId
+        createCustomerFromExternalSource). Body {externalRegistryId, type,
+        relationType?}; ?createDefaultCase mirrors the auto-case the User-API
+        path creates. Returns {id} (the new customer id).
+
+        NOTE: REST has no enrichment-completion status endpoint yet, so this
+        does NOT wait for isFullyInitialized — pair it with wait_enrichment()
+        (User-API, optional) when contacts/documents must be present before the
+        next read. Maps domain PERSON -> type INDIVIDUAL."""
+        self._ensure_auth()
+        actor_type = "INDIVIDUAL" if domain.upper() in ("PERSON", "INDIVIDUAL") else "ENTITY"
+        body = {"externalRegistryId": external_registry_id, "type": actor_type}
+        if relation_type:
+            body["relationType"] = relation_type
+        params = {"createDefaultCase": "true" if create_case else "false"}
+        r = self.session.post(
+            self._url("/customers/externalSource"), params=params, json=body,
+        )
+        if r.status_code >= 400:
+            log.error("create_customer_from_registry_rest failed (%d): %s",
+                      r.status_code, r.text[:300])
+        r.raise_for_status()
+        return r.json()
+
+    def wait_enrichment(self, business_relation_id: str, timeout: float = 60) -> bool:
+        """OPTIONAL User-API poll (PENDING REST — see REST_MAPPING.md §2.1).
+        Polls /api/customers/business-relation until isFullyInitialized. No-ops
+        and returns False if User-API creds are absent, so REST-only callers
+        still work (enrichment just completes in the background)."""
+        if not (self.user_email and self.user_password):
+            log.info("wait_enrichment skipped — no User-API creds (enrichment runs async)")
+            return False
+        t_start = time.time()
+        while time.time() - t_start < timeout:
+            r = requests.get(
+                f"{self.base_url}/api/customers/business-relation",
+                params={"businessRelationId": business_relation_id},
+                headers=self._user_headers(), verify=self.session.verify,
+            )
+            if r.ok and r.json().get("isFullyInitialized"):
+                return True
+            time.sleep(2)
+        log.warning("wait_enrichment timed out on %s", business_relation_id)
+        return False
 
     def create_customer_from_contact(self, source_cid: str, contact_id: str,
                                      as_lead: bool = False) -> dict:

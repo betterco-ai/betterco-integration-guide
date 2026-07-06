@@ -49,14 +49,19 @@ Or skip the manual copy: start the app and use the **Zugangsdaten** tab to enter
 credentials in the browser — it writes the `.env`, runs `verify_env()`, and (if OK)
 swaps in the live client without a restart. The app boots even with no/invalid env so
 you can set one up from there. Stored secrets are masked on reload (leave them blank to
-keep). REST key+secret cover the customer/case/process/document calls; User-API
-email+password are needed for registry search (step 1) and enriched "Akte anlegen" (step 3).
+keep). REST key+secret now cover the core flow end to end — registry search, "Akte
+anlegen", customer/case/process/document reads & writes, and the risk (F1400) step
+submit + read-back. User-API email+password are only still needed for the parts with no
+clean REST equivalent yet (see **`REST_MAPPING.md`**): the **relations/contacts tab**, the
+**AML screening** flow, and the *optional* enrichment-completion wait after create.
 
-> The app needs **both** REST (key+secret) and User-API (email+password) credentials:
-> REST for customer/case/process/document reads & writes, the User-API registry path
-> only for the enriched NorthData/company.info customer creation in step 3.
-> Run `BetterCoClient().verify_env()` (or just start the app) to confirm the env —
-> a wrong `BETTERCO_ORG_ID` is silent and lands data under the wrong advisor org.
+> The migration to REST is intentionally partial — "clean update on REST, wait for others
+> to evolve". The onboarding front half runs on the REST key+secret token alone; the
+> `*_rest` client methods (`search_registry_rest`, `create_customer_from_registry_rest`,
+> `get_full_data_rest`, `submit_step_rest`) are verified against the live base by
+> `tests_rest_parity.py`. Run `BetterCoClient().verify_env()` (or just start the app) to
+> confirm the env — a wrong `BETTERCO_ORG_ID` is silent and lands data under the wrong
+> advisor org.
 
 ## Run
 
@@ -76,6 +81,9 @@ Windows: double-click `run_widget.bat`. Opens http://localhost:8770.
 | `index.html` | single-page UI |
 | `reference_flow.py` | scripted 9-step flow + the `connect()` / env helpers `app.py` imports |
 | `HTTP_REFERENCE.md` | raw HTTP request/response per step |
+| `REST_MAPPING.md` | User-API→REST mapping + migration status (what runs on REST vs pending) |
+| `tests_rest_parity.py` | live per-call parity tests for the REST twins (`--create` for the guarded write path) |
+| `tests_e2e_flow.py` | live e2e: builds the same company via OLD (User-API) and NEW (REST) paths, asserts equivalence, deletes both (editor sandbox only) |
 | `betterco_client.py` | **vendored** BetterCo API client (snapshot — see Development) |
 | `workspaces/` | per-workspace `.env` files (git-ignored; `example.env` is the template) |
 

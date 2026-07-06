@@ -21,14 +21,11 @@ import os
 import signal
 import subprocess
 import threading
-import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-
-import requests
 
 from betterco_client import BetterCoClient
 from reference_flow import connect, _as_list, _parse_env_file
@@ -386,16 +383,11 @@ def _find_risk_process(cid: str):
 
 def _risk_full_data(cid: str, pid: str) -> dict:
     """Read full-data WITH the F1400 processId — required for riskProfile/riskContainer
-    to be populated (they are process-scoped). Mirrors the flow's getUrl."""
-    r = requests.get(
-        _client.base_url + "/api/client/onboarding/full-data",
-        headers=_client._user_headers(), verify=_client.session.verify,
-        params={"businessRelationId": cid, "processId": pid,
-                "sortingStrategy": "COMPLIANCE",
-                "roleTypes": ["UBO_CURRENT", "LEGAL_REP_CURRENT", "ACTING_PERSON"],
-                "limit": 50})
-    r.raise_for_status()
-    return r.json()
+    to be populated (they are process-scoped). REST getProcessFullData is keyed by
+    process id and returns identical riskProfile/riskContainer/amlProfile (parity
+    verified live); the User-API roleTypes/sortingStrategy only affected contact
+    ordering, not the risk fields."""
+    return _client.get_full_data_rest(pid)
 
 
 def _risk_read_answers(fd: dict) -> dict:
@@ -970,10 +962,11 @@ class Handler(BaseHTTPRequestHandler):
                     if not case_id:
                         return self._send_json({"error": "Kein Case zum Anlegen des F1400-Prozesses"}, 400)
                     pid = _client.create_process(cid, case_id, RISK_FLOW)["id"]
+                # REST updateProcessFullData (resolves taskSpec -> instance id).
                 if p1444:
-                    _client.submit_step(cid, pid, RISK_STEP_HIGH, p1444)
+                    _client.submit_step_spec_rest(cid, case_id, pid, RISK_STEP_HIGH, p1444)
                 if p1448:
-                    _client.submit_step(cid, pid, RISK_STEP_TAX, p1448)
+                    _client.submit_step_spec_rest(cid, case_id, pid, RISK_STEP_TAX, p1448)
                 fd = _risk_full_data(cid, pid)
             et = (fd.get("clientType") or {}).get("entityStageType")
             return self._send_json({"cid": cid, "pid": pid, "saved": True,
@@ -1118,27 +1111,18 @@ class Handler(BaseHTTPRequestHandler):
         category = "INDIVIDUAL" if is_person else "ENTITY"
         try:
             with _client_lock:
-                # 1) enriched client via NorthData registry path
-                payload = {
-                    "clientActorExternalId": ext_id,
-                    "advisorActorId": _org_id,
-                    "customerCategoryType": category,
-                    "clientActorName": name,
-                    "domain": domain,
-                    "purchaseDocuments": False,
-                }
-                r = requests.post(_client.base_url + "/api/customers", json=payload,
-                                  headers=_client._user_headers(), verify=_client.session.verify)
-                r.raise_for_status()
-                cid = r.json()["businessRelationId"]
-                # poll until NorthData/company.info enrichment finished
-                for _ in range(30):
-                    rr = requests.get(_client.base_url + "/api/customers/business-relation",
-                                      params={"businessRelationId": cid},
-                                      headers=_client._user_headers(), verify=_client.session.verify)
-                    if rr.ok and rr.json().get("isFullyInitialized"):
-                        break
-                    time.sleep(2)
+                # 1) enriched client via REST createCustomerFromExternalSource
+                #    (replaces User-API POST /api/customers — see REST_MAPPING.md).
+                #    createDefaultCase=true mirrors the auto-case the old path made.
+                created = _client.create_customer_from_registry_rest(
+                    ext_id, domain=domain, create_case=True)
+                cid = created["id"]
+                # Enrichment runs ASYNC (contacts trickle in — ~2 immediately,
+                # full set after ~15s). wait_enrichment polls until complete, but
+                # it needs User-API creds (no REST completion signal yet —
+                # REST_MAPPING.md §2.1). Without them it no-ops and the matter
+                # proceeds with partial contacts.
+                _client.wait_enrichment(cid, timeout=60)
                 # 2) matter = the auto-created case
                 cases = _as_list(_client.list_cases(cid))
                 case_id = cases[0]["id"] if cases else _client.create_case(cid, name)
@@ -1183,6 +1167,10 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             with _client_lock:
+                # PENDING REST: relations graph is User-API only. REST models this
+                # as customer contacts (getCustomerContacts) but the shape differs
+                # (⚠️ partial in REST_MAPPING.md §1 row 16) — kept on User-API until
+                # the contacts REST model is reconciled ("wait for others to evolve").
                 raw = _client.list_relations(cid)
 
             logging.getLogger("betterco").info(
@@ -1280,6 +1268,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"error": "cid, contactId und mind. eine Rolle erforderlich"}, 400)
         try:
             with _client_lock:
+                # PENDING REST: relations write is User-API only (see list_relations note).
                 results = [_client.add_contact_relation(cid, contact_id, c) for c in codes]
             return self._send_json({"ok": True, "added": len(results), "results": results})
         except Exception as exc:  # noqa: BLE001
@@ -1305,7 +1294,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"error": "query required", "hits": []}, 400)
         try:
             with _client_lock:
-                hits = _client.search_registry(query, domain=domain)
+                hits = _client.search_registry_rest(query, domain=domain)  # REST companiesSearch
             # normalize a display subset, but keep the full raw hit for the Stammdaten panel
             results = []
             for h in hits:
