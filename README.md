@@ -84,6 +84,7 @@ Windows: double-click `run_widget.bat`. Opens http://localhost:8770.
 | `REST_MAPPING.md` | User-API→REST mapping + migration status (what runs on REST vs pending) |
 | `tests_rest_parity.py` | live per-call parity tests for the REST twins (`--create` for the guarded write path) |
 | `tests_e2e_flow.py` | live e2e: builds the same company via OLD (User-API) and NEW (REST) paths, asserts equivalence, deletes both (editor sandbox only) |
+| `tests_app_e2e.py` | live e2e: boots the real server and drives the HTTP endpoints (search→create→processes→risk), deletes the customer (editor sandbox only) |
 | `betterco_client.py` | **vendored** BetterCo API client (snapshot — see Development) |
 | `workspaces/` | per-workspace `.env` files (git-ignored; `example.env` is the template) |
 

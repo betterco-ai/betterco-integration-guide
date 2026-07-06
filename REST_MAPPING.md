@@ -179,11 +179,21 @@ REST token alone.
 ## 5. Migration status (implemented in this repo)
 
 A "clean update on REST, wait for others to evolve" migration has been applied and **verified against the
-live base**: per-call parity (`tests_rest_parity.py`, 12/12 incl. a guarded create/submit/delete) **and**
-a full-flow equivalence run (`tests_e2e_flow.py`, 15/15) that builds the same registry company via the
-OLD User-API path and the NEW REST path and asserts identical results (51 contacts / 3 docs / case /
-clientType / aml + risk sections), including cross-reads via the opposite API. Both tests write only to
-the editor sandbox and delete what they create; `tests_e2e_flow.py` refuses any prod/afileon env.
+live base** at three layers:
+- `tests_rest_parity.py` (12/12) — per-call parity incl. a guarded create/submit/delete.
+- `tests_e2e_flow.py` (15/15) — builds the same company via the OLD User-API path and the NEW REST path
+  and asserts identical results (51 contacts / 3 docs / case / clientType / aml + risk), incl. cross-reads.
+- `tests_app_e2e.py` (11/11) — boots the **real app server** and drives the actual HTTP endpoints
+  (`/api/search`, `/api/create-matter`, `/api/processes`, `/api/customer`, `/api/risk-eval[-save]`,
+  `/api/risk-profile`), then deletes the customer.
+
+All three write only to the editor sandbox and delete what they create; the writing ones refuse any
+prod/afileon env.
+
+**Behaviour the e2e pinned down:** `submit_step_rest` defaults to `action=OPEN` (**save, don't complete**)
+to match the old `submit_step` (whose body set `taskStatuses visible:True`, never a completion);
+`action=COMPLETE` would run step-completion validation. Note: the F1400 risk step rejects a minimal
+answer on a *fresh* matter — the OLD User-API path 500s there too (a flow prerequisite, not a regression).
 
 **Flipped to REST** (User API no longer used for these):
 

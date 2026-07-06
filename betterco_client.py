@@ -1375,17 +1375,21 @@ class BetterCoClient:
     # poll still require the User API ("wait for others to evolve").
 
     def submit_step_rest(self, process_id: str, step_id: str, values: dict,
-                         *, action: str = "COMPLETE") -> dict:
+                         *, action: str = "OPEN") -> dict:
         """REST twin of submit_step: persist a flow step via
         PATCH /restapi/v1/.../processes/{pid}/full-data?taskId=<stepId>&action=
         (operationId updateProcessFullData). Keyed by process_id (REST has no
         businessRelationId param).
 
         Unlike the User-API endpoint, the REST body is PURE FullData — task
-        completion is driven by the query params, NOT a `taskStatuses` entry in
-        the body (which REST rejects: 400 "Invalid fields: ['taskStatuses']").
-        `action` marks the task state (COMPLETE by default; OPEN/SKIP to save
-        without completing). The `values` FullData containers
+        state is driven by the query params, NOT a `taskStatuses` entry in the
+        body (which REST rejects: 400 "Invalid fields: ['taskStatuses']").
+
+        `action` defaults to OPEN = SAVE WITHOUT COMPLETING, matching the old
+        submit_step (whose body set taskStatuses `visible:True`, never a
+        completion). Pass action="COMPLETE" only when you explicitly want to
+        close the step (which runs completion validation and 400s on an
+        incomplete step). The `values` FullData containers
         (additionalProcessData.<topic>, additionalActorData, entityLegalInfo …)
         are identical to the User-API endpoint."""
         self._ensure_auth()
