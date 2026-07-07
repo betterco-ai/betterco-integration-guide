@@ -945,7 +945,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"error": str(exc)}, 500)
 
     def _handle_risk_eval_save(self, body: dict):
-        """Persist the P1444+P1448 answers via submit_step (the runner's save).
+        """Persist the P1444+P1448 answers via submit_step_spec_rest (REST
+        updateProcessFullData — the runner's save, now on the REST API).
 
         Ensures an F1400_RiskEvaluation process (creates one if missing), writes each
         page's primary bindings + derived RISK flags, then reads back with the processId
