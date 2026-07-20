@@ -13,9 +13,19 @@ Gaps checked (see REST_GAPS_BACKEND.md for the specs):
   G4   enrichment signal via getWorkflowStatus.isFullyInitialized   [expected CLOSED]
   B0   full-data PATCH silently 200s on the screening body          [expected OPEN]
   G1   POST .../screenings — run a scan                             [expected OPEN]
-  G3a  ScreeningProfile populated on Actor/Contact after a scan     [expected OPEN]
+  G1m  PATCH .../screenings/monitor — does enabling monitoring scan? [spec v2.0.0 NEW]
+  G3a  ScreeningProfile populated on Actor/Contact after a scan     [spec v2.0.0 NEW read]
   G3b  match candidates readable over REST                          [expected OPEN]
   G2   PATCH .../screenings/{id} — record a decision                [expected OPEN]
+
+Spec-diff note (betterco_api.yaml v2.0.0, 188 ops): a whole org-level
+`Screenings` tag appeared that the original audit never probed —
+getOrganizationScreenings (GET .../organizations/{org}/screenings) exposes a
+CustomerScreeningProfile.screeningData (matchStatus/riskLevel/totalHits/...),
+and putCustomerOrContactOnOffScreeningMonitor (PATCH .../screenings/monitor)
+is a candidate scan trigger. G3a/G3b now also read this org-level surface, and
+G1m probes the monitor toggle. Presence in the spec is NOT proof (this API has
+declared ScreeningProfile fields that returned {} live) — hence the live probe.
 
 Writes ONE throwaway customer and deletes it in a finally block. Editor
 sandbox only — refuses any prod/afileon env.
@@ -54,6 +64,32 @@ def _workflow_status(c, pid):
 
 def _screening_profile(c, cid):
     return ((c.get_customer(cid).get("riskProfile") or {}).get("screeningProfile") or {})
+
+
+def _org_screening_profile(c, cid):
+    """Read the customer's ScreeningProfile from the ORG-level bulk endpoint
+    getOrganizationScreenings (GET .../organizations/{org}/screenings) — the
+    surface the audit never probed. Returns the ScreeningProfile (screeningData)
+    for `cid`, or {} if absent. Follows pagination, bounded."""
+    url, params = c._url("/screenings"), {"entity_type": "ALL", "size": 200, "page": 0}
+    for _ in range(10):
+        r = c.session.get(url, params=params)
+        if not (r.ok and r.text):
+            return {}
+        data = r.json()
+        for row in (data.get("results") or []):
+            if row.get("customerId") == cid:
+                return row.get("screeningData") or {}
+        url, params = data.get("next"), None  # next carries page/size itself
+        if not url:
+            break
+    return {}
+
+
+def _populated(sp):
+    """A ScreeningProfile counts as populated once a scan has landed on it."""
+    return bool(sp.get("matchStatus") or sp.get("lastScreeningDate")
+                or sp.get("totalHits") is not None)
 
 
 # --------------------------------------------------------------------------- G4
@@ -132,7 +168,9 @@ def check_g1(c, cid, **_):
 # -------------------------------------------------------------------------- G3a
 def check_g3a(c, cid, scr_pid, **_):
     """Needs a REAL scan first. Triggers via User API (the only working trigger
-    today), then asks what REST exposes. CLOSED if ScreeningProfile is populated."""
+    today), then asks what REST exposes. CLOSED if ScreeningProfile is populated
+    on EITHER the per-customer read (getCustomerById, which returned {} in the
+    audit) or the NEW org-level bulk read (getOrganizationScreenings)."""
     try:
         c.run_screening(cid, scr_pid)
     except Exception as exc:
@@ -147,31 +185,72 @@ def check_g3a(c, cid, scr_pid, **_):
     if not rows:
         report("G3a", OPEN, "no scan result even via User API — inconclusive")
         return
-    sp = _screening_profile(c, cid)
-    if sp.get("matchStatus") or sp.get("lastScreeningDate") or sp.get("totalHits") is not None:
-        report("G3a", CLOSED, f"screeningProfile populated: {sorted(sp)[:6]}")
+
+    per_customer = _screening_profile(c, cid)
+    org = {}
+    for _ in range(6):  # give the org-level projection time to catch up
+        org = _org_screening_profile(c, cid)
+        if _populated(org):
+            break
+        time.sleep(3)
+
+    if _populated(per_customer):
+        report("G3a", CLOSED, f"per-customer screeningProfile populated: {sorted(per_customer)[:6]}")
+    elif _populated(org):
+        report("G3a", CLOSED, f"NEW org-level getOrganizationScreenings exposes it "
+                              f"(getCustomerById still empty): {sorted(org)[:6]}")
     else:
-        report("G3a", OPEN, f"screeningProfile == {sp!r} despite {len(rows)} "
-                            f"candidate(s) via User API")
+        report("G3a", OPEN, f"both reads empty despite {len(rows)} candidate(s) "
+                            f"— per-customer={per_customer!r} org={org!r}")
 
 
 # -------------------------------------------------------------------------- G3b
 def check_g3b(c, cid, **_):
-    """CLOSED if candidates are readable over REST — either as
-    ScreeningProfile.candidates[] (preferred) or a results endpoint."""
-    sp = _screening_profile(c, cid)
-    if sp.get("candidates"):
-        report("G3b", CLOSED, f"ScreeningProfile.candidates[] present "
-                              f"({len(sp['candidates'])} rows)")
-        return
+    """CLOSED if candidates are readable over REST — as ScreeningProfile.candidates[]
+    on EITHER the per-customer or the org-level read (the v2.0.0 ScreeningProfile
+    schema still declares only counters + searchId, no candidates[]), or a results
+    endpoint."""
+    for label, sp in (("per-customer", _screening_profile(c, cid)),
+                      ("org-level", _org_screening_profile(c, cid))):
+        if sp.get("candidates"):
+            report("G3b", CLOSED, f"{label} ScreeningProfile.candidates[] present "
+                                  f"({len(sp['candidates'])} rows)")
+            return
     r = c.session.get(c._url(f"/customers/{cid}/screenings/results"))
     if r.status_code in (404, 405):
-        report("G3b", OPEN, "no candidates[] on ScreeningProfile and "
-                            f".../screenings/results -> HTTP {r.status_code}")
+        report("G3b", OPEN, "no candidates[] on ScreeningProfile (per-customer or org) "
+                            f"and .../screenings/results -> HTTP {r.status_code}")
     elif r.ok:
         report("G3b", CLOSED, f".../screenings/results -> HTTP 200")
     else:
         report("G3b", PARTIAL, f".../screenings/results -> HTTP {r.status_code}")
+
+
+# -------------------------------------------------------------------------- G1m
+def check_g1_monitor(c, cid, **_):
+    """v2.0.0 NEW surface the audit missed: PATCH .../screenings/monitor
+    (putCustomerOrContactOnOffScreeningMonitor). Enabling monitoring may enrol the
+    customer AND kick off an initial scan. CLOSED if the PATCH is accepted AND a
+    scan lands; PARTIAL if accepted but no scan (toggle only); OPEN if absent.
+    Runs after B0/G1 (which need an unscreened customer to judge attribution)."""
+    r = c.session.patch(c._url("/screenings/monitor"),
+                        json={"customerId": cid, "enable": True}, timeout=120)
+    if r.status_code in (404, 405):
+        report("G1m", OPEN, f"PATCH .../screenings/monitor -> HTTP {r.status_code} "
+                            f"(endpoint absent)")
+        return
+    if r.status_code >= 400:
+        report("G1m", PARTIAL, f"endpoint exists but rejected: HTTP {r.status_code} "
+                               f"{(r.text or '')[:120]}")
+        return
+    for _ in range(10):
+        time.sleep(3)
+        if (_screening_profile(c, cid).get("lastScreeningDate")
+                or _org_screening_profile(c, cid).get("lastScreeningDate")):
+            report("G1m", CLOSED, f"HTTP {r.status_code}; enabling monitoring ran a scan")
+            return
+    report("G1m", PARTIAL, f"HTTP {r.status_code} accepted but no scan within 30s "
+                           f"(monitoring toggled, not a trigger)")
 
 
 # --------------------------------------------------------------------------- G2
@@ -189,11 +268,13 @@ def check_g2(c, cid, **_):
         report("G2", PARTIAL, f"unexpected HTTP {r.status_code} — verify by hand")
 
 
-CHECKS = {"G4": check_g4, "B0": check_b0, "G1": check_g1,
+CHECKS = {"G4": check_g4, "B0": check_b0, "G1": check_g1, "G1m": check_g1_monitor,
           "G3a": check_g3a, "G3b": check_g3b, "G2": check_g2}
-# G3a must run before G3b (it produces the scan G3b reads) and after B0/G1
+# G1m/G3a must run before G3b (they produce the scan G3b reads) and after B0/G1
 # (which must see an unscreened customer to judge whether THEY triggered it).
-ORDER = ["G4", "B0", "G1", "G3a", "G3b", "G2"]
+# G1m sits between them: it is itself a candidate trigger, so it must not run
+# before B0/G1 or it would pollute their attribution.
+ORDER = ["G4", "B0", "G1", "G1m", "G3a", "G3b", "G2"]
 
 
 def main():
