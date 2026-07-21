@@ -12,20 +12,31 @@ progress on the ticket is provable with one command instead of assumed.
 Gaps checked (see REST_GAPS_BACKEND.md for the specs):
   G4   enrichment signal via getWorkflowStatus.isFullyInitialized   [expected CLOSED]
   B0   full-data PATCH silently 200s on the screening body          [expected OPEN]
-  G1   POST .../screenings — run a scan                             [expected OPEN]
-  G1m  PATCH .../screenings/monitor — does enabling monitoring scan? [spec v2.0.0 NEW]
-  G3a  ScreeningProfile populated on Actor/Contact after a scan     [spec v2.0.0 NEW read]
-  G3b  match candidates readable over REST                          [expected OPEN]
-  G2   PATCH .../screenings/{id} — record a decision                [expected OPEN]
+  G1   POST .../screening/scan — run a scan (entity + contact)      [NOW PRESENT, 400s]
+  G1m  PUT .../screening/monitor — monitoring toggle                [PRESENT, 200]
+  G3a  ScreeningProfile populated after a scan (per-cust/org/scan)  [expected OPEN]
+  G3b  match candidates via getCustomerSearchResults                [route PRESENT, 404 no-data]
+  G2   POST .../screening/details — record a decision               [NOW PRESENT, 400s]
 
-Spec-diff note (betterco_api.yaml v2.0.0, 188 ops): a whole org-level
-`Screenings` tag appeared that the original audit never probed —
-getOrganizationScreenings (GET .../organizations/{org}/screenings) exposes a
-CustomerScreeningProfile.screeningData (matchStatus/riskLevel/totalHits/...),
-and putCustomerOrContactOnOffScreeningMonitor (PATCH .../screenings/monitor)
-is a candidate scan trigger. G3a/G3b now also read this org-level surface, and
-G1m probes the monitor toggle. Presence in the spec is NOT proof (this API has
-declared ScreeningProfile fields that returned {} live) — hence the live probe.
+Spec-diff note (editor betterco_api.yaml v2.0.0, 204 ops — vs 178 on
+app.betterco.ai): as of 2026-07-21 a whole family of 8 screening ops appeared
+under the **Customers** tag on the editor host, absent from the public app spec.
+They are 1:1 REST twins of the internal /api/.../screening/* routes:
+  scanCustomer / scanCustomerContact          POST .../screening/scan
+  scanCustomerDetails / ...ContactDetails     POST .../screening/details  (decision)
+  updateCustomer[Contact]ScreeningMonitoring  PUT  .../screening/monitor
+  getCustomer[Contact]ScreeningCertificate    GET  .../screening/certificate
+plus the earlier org-level Screenings tag (getOrganizationScreenings exposes a
+ScreeningProfile.screeningData; putCustomerOrContactOnOffScreeningMonitor).
+
+Presence is NOT proof — and live probing (2026-07-21) shows the mirror is
+faithful INCLUDING the internal bugs: scan returns 400 "Input data is corrupted"
+(the provider search fires — candidates get fetched — but the screeningProfile
+never commits), details rejects the decision body (400 "Invalid fields:
+['attributes',...]" — it rejects the very SearchResponseData.attributes the spec
+declares), and getCustomerById.screeningProfile / getOrganizationScreenings stay
+empty for a freshly-scanned customer. Monitor toggles (200); certificate routes
+(404 until one exists). So the ask flips from "build these" to "fix these".
 
 Writes ONE throwaway customer and deletes it in a finally block. Editor
 sandbox only — refuses any prod/afileon env.
@@ -86,10 +97,30 @@ def _org_screening_profile(c, cid):
     return {}
 
 
+def _contact_screening_profile(c, cid, ct_id):
+    cust = c.get_customer(cid)
+    for ct in (cust.get("contacts") or cust.get("relations") or []):
+        if ct.get("id") == ct_id or ct.get("actorId") == ct_id:
+            return (ct.get("riskProfile") or {}).get("screeningProfile") or {}
+    return {}
+
+
 def _populated(sp):
     """A ScreeningProfile counts as populated once a scan has landed on it."""
     return bool(sp.get("matchStatus") or sp.get("lastScreeningDate")
                 or sp.get("totalHits") is not None)
+
+
+def _new_scan(c, cid, ct_id=None, body=None):
+    """The NEW 'Customers'-tagged scan twin: POST .../screening/scan.
+    Entity when ct_id is None, else the contact. Returns (status, json|text)."""
+    seg = f"/customers/{cid}/contacts/{ct_id}" if ct_id else f"/customers/{cid}"
+    r = c.session.post(c._url(f"{seg}/screening/scan"),
+                       json=body if body is not None else None, timeout=120)
+    try:
+        return r.status_code, (r.json() if r.text else None)
+    except Exception:
+        return r.status_code, (r.text or "")[:200]
 
 
 # --------------------------------------------------------------------------- G4
@@ -145,24 +176,43 @@ def check_b0(c, cid, scr_pid, p1615, **_):
 
 
 # --------------------------------------------------------------------------- G1
-def check_g1(c, cid, **_):
-    """CLOSED if POST .../customers/{cid}/screenings exists and triggers a scan."""
-    r = c.session.post(c._url(f"/customers/{cid}/screenings"),
-                       json={"rescreen": True, "roleTypes": list(ROLES)}, timeout=120)
-    if r.status_code in (404, 405):
-        report("G1", OPEN, f"POST .../customers/{{id}}/screenings -> HTTP {r.status_code} "
-                           f"(endpoint does not exist)")
-        return
-    if r.status_code >= 400:
-        report("G1", PARTIAL, f"endpoint exists but rejected: HTTP {r.status_code} "
-                              f"{(r.text or '')[:120]}")
-        return
-    for _ in range(10):
-        time.sleep(3)
-        if _screening_profile(c, cid).get("lastScreeningDate"):
-            report("G1", CLOSED, f"HTTP {r.status_code} and a scan ran")
-            return
-    report("G1", PARTIAL, f"HTTP {r.status_code} but no scan observed within 30s")
+def check_g1(c, cid, scr_ct=None, **_):
+    """The scan twins NOW EXIST under the Customers tag
+    (scanCustomer / scanCustomerContact, POST .../screening/scan). CLOSED if the
+    scan returns 2xx and actually commits a screeningProfile; PARTIAL if the
+    endpoint is present but 400s / commits nothing (the internal bug, mirrored);
+    OPEN only if it 404s. Probes the entity, and the screenable contact if one
+    was created."""
+    targets = [("entity", None)] + ([("contact", scr_ct)] if scr_ct else [])
+    verdict, notes = None, []
+    for label, ct in targets:
+        s, b = _new_scan(c, cid, ct)
+        msg = b.get("message") if isinstance(b, dict) else (b or "")
+        if s in (404, 405):
+            notes.append(f"{label}: HTTP {s} (absent)")
+            verdict = verdict or OPEN
+            continue
+        if s >= 400:
+            notes.append(f"{label}: HTTP {s} {str(msg)[:60]!r}")
+            # endpoint present but rejects — mirror of the internal scan bug
+            verdict = PARTIAL if verdict != CLOSED else CLOSED
+            continue
+        committed = False
+        for _ in range(8):
+            time.sleep(3)
+            sp = (_contact_screening_profile(c, cid, ct) if ct
+                  else _screening_profile(c, cid))
+            if sp.get("lastScreeningDate"):
+                committed = True
+                break
+        if committed:
+            notes.append(f"{label}: HTTP {s} + committed")
+            verdict = CLOSED
+        else:
+            notes.append(f"{label}: HTTP {s} accepted but no commit in 24s")
+            verdict = PARTIAL if verdict != CLOSED else CLOSED
+    report("G1", verdict or OPEN,
+           "POST .../screening/scan present, " + "; ".join(notes))
 
 
 # -------------------------------------------------------------------------- G3a
@@ -205,67 +255,92 @@ def check_g3a(c, cid, scr_pid, **_):
 
 
 # -------------------------------------------------------------------------- G3b
-def check_g3b(c, cid, **_):
-    """CLOSED if candidates are readable over REST — as ScreeningProfile.candidates[]
-    on EITHER the per-customer or the org-level read (the v2.0.0 ScreeningProfile
-    schema still declares only counters + searchId, no candidates[]), or a results
-    endpoint."""
-    for label, sp in (("per-customer", _screening_profile(c, cid)),
-                      ("org-level", _org_screening_profile(c, cid))):
-        if sp.get("candidates"):
-            report("G3b", CLOSED, f"{label} ScreeningProfile.candidates[] present "
-                                  f"({len(sp['candidates'])} rows)")
-            return
-    r = c.session.get(c._url(f"/customers/{cid}/screenings/results"))
-    if r.status_code in (404, 405):
-        report("G3b", OPEN, "no candidates[] on ScreeningProfile (per-customer or org) "
-                            f"and .../screenings/results -> HTTP {r.status_code}")
-    elif r.ok:
-        report("G3b", CLOSED, f".../screenings/results -> HTTP 200")
+def check_g3b(c, cid, scr_ct=None, **_):
+    """The candidate-read twin NOW EXISTS: getCustomer[Contact]SearchResults
+    (GET .../search-results, Customers tag) — the REST mirror of the internal
+    /api/customers/{brId}/search-results. CLOSED if it returns candidates; PARTIAL
+    if the route exists but has no data (GET 404 while OPTIONS 200 — present, but
+    blocked by G1 never committing a scan); OPEN if the route is absent (OPTIONS
+    404). getCustomer[Contact]SearchResultDetails (.../search-results/{id}) is the
+    G3c detail twin — same fate."""
+    paths = [("entity", f"/customers/{cid}/search-results")]
+    if scr_ct:
+        paths.append(("contact", f"/customers/{cid}/contacts/{scr_ct}/search-results"))
+    present, got = False, False
+    for label, p in paths:
+        g = c.session.get(c._url(p))
+        if g.ok and g.text:
+            data = (g.json() or {}).get("searchResults", {}).get("data") or []
+            if data:
+                report("G3b", CLOSED, f"{label} .../search-results -> {len(data)} candidate(s)")
+                return
+            got = True
+        o = c.session.options(c._url(p))
+        if o.status_code < 400:
+            present = True
+    if got:
+        report("G3b", PARTIAL, ".../search-results returned 200 but no candidates")
+    elif present:
+        report("G3b", PARTIAL, "getCustomerSearchResults route present (OPTIONS 200) but GET 404 "
+                               "— no committed scan to read (blocked by G1)")
     else:
-        report("G3b", PARTIAL, f".../screenings/results -> HTTP {r.status_code}")
+        report("G3b", OPEN, ".../search-results absent (OPTIONS 404)")
 
 
 # -------------------------------------------------------------------------- G1m
 def check_g1_monitor(c, cid, **_):
-    """v2.0.0 NEW surface the audit missed: PATCH .../screenings/monitor
-    (putCustomerOrContactOnOffScreeningMonitor). Enabling monitoring may enrol the
-    customer AND kick off an initial scan. CLOSED if the PATCH is accepted AND a
-    scan lands; PARTIAL if accepted but no scan (toggle only); OPEN if absent.
-    Runs after B0/G1 (which need an unscreened customer to judge attribution)."""
-    r = c.session.patch(c._url("/screenings/monitor"),
-                        json={"customerId": cid, "enable": True}, timeout=120)
+    """The per-customer monitor twin: PUT .../customers/{cid}/screening/monitor
+    (updateCustomerScreeningMonitoring, {enable}). This is a toggle, not a scan
+    trigger — reported here for completeness. CLOSED-as-toggle if the PUT is
+    accepted (2xx); if it also happens to run a scan we note that; OPEN if absent.
+    Runs after B0/G1 so it can't pollute their scan attribution."""
+    r = c.session.put(c._url(f"/customers/{cid}/screening/monitor"),
+                      json={"enable": True}, timeout=120)
     if r.status_code in (404, 405):
-        report("G1m", OPEN, f"PATCH .../screenings/monitor -> HTTP {r.status_code} "
+        report("G1m", OPEN, f"PUT .../screening/monitor -> HTTP {r.status_code} "
                             f"(endpoint absent)")
         return
     if r.status_code >= 400:
-        report("G1m", PARTIAL, f"endpoint exists but rejected: HTTP {r.status_code} "
+        report("G1m", PARTIAL, f"endpoint present but rejected: HTTP {r.status_code} "
                                f"{(r.text or '')[:120]}")
         return
-    for _ in range(10):
+    for _ in range(4):
         time.sleep(3)
         if (_screening_profile(c, cid).get("lastScreeningDate")
                 or _org_screening_profile(c, cid).get("lastScreeningDate")):
-            report("G1m", CLOSED, f"HTTP {r.status_code}; enabling monitoring ran a scan")
+            report("G1m", CLOSED, f"HTTP {r.status_code}; toggle ALSO ran a scan")
             return
-    report("G1m", PARTIAL, f"HTTP {r.status_code} accepted but no scan within 30s "
-                           f"(monitoring toggled, not a trigger)")
+    report("G1m", CLOSED, f"HTTP {r.status_code} accepted (monitoring toggle only, "
+                          f"not a scan trigger)")
 
 
 # --------------------------------------------------------------------------- G2
-def check_g2(c, cid, **_):
-    """The one gap with nothing to call. Probe for the proposed route's existence
-    only — a 404 confirms it's still absent. Deliberately does not write."""
-    r = c.session.patch(c._url(f"/customers/{cid}/screenings/probe-nonexistent-id"),
-                        json={"matchStatus": "NO_MATCH"})
+def check_g2(c, cid, scr_ct=None, **_):
+    """The decision-write twin NOW EXISTS: POST .../screening/details
+    (scanCustomerDetails / ...ContactDetails). CLOSED if a decision write is
+    accepted (2xx) and reflected as matchStatus; PARTIAL if the endpoint is
+    present but rejects the documented body; OPEN if it 404s. Probes the contact
+    route (uniform with entity). Feeds the spec-typed SearchResponseData shape
+    AND a literal null (the internal no-match marker)."""
+    seg = (f"/customers/{cid}/contacts/{scr_ct}" if scr_ct
+           else f"/customers/{cid}") + "/screening/details"
+    typed = {"id": "probe", "type": "individuals",
+             "attributes": {"match": "NO_MATCH", "name": "probe", "score": "0"}}
+    r = c.session.post(c._url(seg), json=typed)
     if r.status_code in (404, 405):
-        report("G2", OPEN, f"PATCH .../screenings/{{id}} -> HTTP {r.status_code} "
+        report("G2", OPEN, f"POST .../screening/details -> HTTP {r.status_code} "
                            f"(no decision-write endpoint)")
-    elif r.status_code == 400:
-        report("G2", PARTIAL, "route appears to exist (400 on a bogus id) — verify by hand")
-    else:
-        report("G2", PARTIAL, f"unexpected HTTP {r.status_code} — verify by hand")
+        return
+    if r.status_code < 400:
+        report("G2", CLOSED, f"POST .../screening/details accepted a decision (HTTP {r.status_code})")
+        return
+    msg = ""
+    try:
+        msg = (r.json() or {}).get("message", "")
+    except Exception:
+        msg = (r.text or "")[:120]
+    report("G2", PARTIAL, f"present but rejects the documented body: HTTP {r.status_code} "
+                          f"{str(msg)[:100]!r}")
 
 
 CHECKS = {"G4": check_g4, "B0": check_b0, "G1": check_g1, "G1m": check_g1_monitor,
@@ -311,8 +386,24 @@ def main():
         p1615 = next((t["id"] for t in tasks
                       if "P1615" in (t.get("taskSpec") or "")), None)
 
+        # A registry-created entity may enrol no in-scope INDIVIDUAL contact, so
+        # the contact-scan twins (scanCustomerContact / ...Details) would have
+        # nothing to hit. Add a deterministic screenable PEP (real match, valid
+        # birthDate) so G1/G2 exercise the natural-person path — the one the
+        # internal API actually screens. Deleted with the customer.
+        scr_ct = None
+        try:
+            scr_ct = c.create_contact(cid, {
+                "type": "INDIVIDUAL",
+                "legalInfo": {"firstName": "Olaf", "lastName": "Scholz",
+                              "legalName": "Olaf Scholz", "birthDate": "1958-06-14",
+                              "nationality": "DE", "gender": "MALE"},
+                "relations": ["9010"]})
+        except Exception as exc:
+            print(f"(could not add screenable contact: {str(exc)[:120]})")
+
         ctx = dict(cid=cid, case_id=case_id, onb_pid=onb_pid,
-                   scr_pid=scr_pid, p1615=p1615)
+                   scr_pid=scr_pid, p1615=p1615, scr_ct=scr_ct)
         for gap in ([args.gap] if args.gap else ORDER):
             if gap in ("B0",) and not p1615:
                 report(gap, PARTIAL, "no P1615 task instance — cannot probe")

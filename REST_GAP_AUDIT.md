@@ -1,8 +1,49 @@
 # REST Gap Audit — every API call in the integration guide
 
-**Date:** 2026-07-17 · **Scope:** `betterco_client.py`, `app.py`, `reference_flow.py`
-**Checked against:** live public OpenAPI spec `app.betterco.ai/bcapi/betterco_api.yaml` (parsed, **178 operations**, `info.version: 2.0.0`)
-**Verified against:** live `editor.betterco.ai` sandbox (3 probe runs, each created and deleted one customer)
+**Date:** 2026-07-17 · **Updated:** 2026-07-21 (editor screening endpoints — see §0) · **Scope:** `betterco_client.py`, `app.py`, `reference_flow.py`
+**Checked against:** live public OpenAPI spec `app.betterco.ai/bcapi/betterco_api.yaml` (parsed, **178 operations**, `info.version: 2.0.0`) — **and** the editor host spec `editor.betterco.ai/bcapi/betterco_api.yaml` (**204 operations**), which as of 2026-07-21 carries 8 screening ops the public spec does not
+**Verified against:** live `editor.betterco.ai` sandbox (each probe run creates and deletes one customer)
+
+> ## §0 — UPDATE 2026-07-21: the screening endpoints now EXIST in REST (but don't work yet)
+>
+> BetterCo shipped, **on the editor host only**, a family of 8 screening ops under the **`Customers`** tag —
+> 1:1 REST twins of the internal `/api/…/screening/*` routes. They are **absent from `app.betterco.ai`**
+> (still 178 ops / 4 screening ops). This flips the screening surface from *"entirely absent from REST"* to
+> *"present in REST but non-functional as probed."*
+>
+> | New op (`Customers` tag) | Path | Live behaviour (probed 2026-07-21) |
+> |---|---|---|
+> | `scanCustomer` / `scanCustomerContact` | `POST …/screening/scan` | **400 "Input data is corrupted"** — the provider search fires (candidates get fetched) but the `screeningProfile` never commits. Faithful mirror of the internal scan bug (§G1). |
+> | `scanCustomerDetails` / `…ContactDetails` | `POST …/screening/details` | **400** — null body → "Input data is corrupted"; candidate body → **"Invalid fields: ['attributes','gender']"** (rejects the very `SearchResponseData.attributes` the spec declares). |
+> | `updateCustomer[Contact]ScreeningMonitoring` | `PUT …/screening/monitor` | **200** — accepted (toggle only, not a scan trigger). |
+> | `getCustomer[Contact]ScreeningCertificate` | `GET …/screening/certificate` | **404** with a "no certificate found" message — routes correctly, returns a cert once one exists. |
+>
+> After a **real** scan (User-API), `getCustomerById.screeningProfile` is **still `{}`** and
+> `getOrganizationScreenings` returns **0 rows** for the freshly-scanned customer. **So the vendor ask flips
+> from "build these endpoints" to "fix the ones just shipped"** — scan must commit instead of 400, details
+> must accept a decision write, and the reads must populate. Re-check: `python tests_rest_gaps.py`.
+> The gap table in §2 is updated to `PARTIAL` accordingly.
+>
+> **The `Customers` tag also gained the READ twins that a committed scan would feed** — all present on
+> editor, all documented, none on `app.betterco.ai`:
+>
+> | New read op | Path | Live (probed 2026-07-21) |
+> |---|---|---|
+> | `getCustomer[Contact]SearchResults` | `GET …/search-results` | **G3b candidate-read twin.** `OPTIONS 200`, `GET 404` (no data — blocked only by G1 never committing). |
+> | `getCustomer[Contact]SearchResultDetails` | `GET …/search-results/{search_id}` | **G3c detail twin.** Same: present, no data yet. |
+> | `getCustomerStructureChart` | `GET …/structure-chart` | **`GET 200`** — the KYC ownership graph (RawGraph, 52 entities / 51 rels) reads over REST **today**. |
+> | `getCustomer[Contact]CompanyInfoAml` | `GET …/aml` | AML company info. `OPTIONS 200`, `GET 404` until data. |
+>
+> **And relations (S3) are now CLOSED** — `addCustomerContactRelation` (`PUT …/contacts/{id}/relations`
+> `{relationIds}`) and `deleteCustomerContactRelation` (`DELETE …/contacts/{id}/relations/{code}`), both
+> `Customers`-tagged. **Live-verified:** `PUT {relationIds:['9060']}` → `201` (adds `9060`, keeps existing
+> `9010` — additive, no clobber); `DELETE …/relations/9060` → `200`. This removes the app's **second**
+> remaining User-API dependency (the relations tab, §4).
+>
+> **Net effect on a REST-only integration:** the blocker collapses from "the whole screening lifecycle" to
+> **one functional defect — the scan does not commit (G1)** — plus its decision-write sibling (G2). Every
+> dependent read (profile, candidates, candidate detail), the ownership graph, and relations are all in place
+> in REST on the editor host.
 
 **Question:** for every outbound BetterCo API call the guide makes — does a REST equivalent exist, and where is one still required?
 
@@ -22,11 +63,13 @@ the API populates it (see G3).
 |---|---|
 | Call sites in `betterco_client.py` | **83** (41 REST / 42 non-REST) |
 | Client methods reached from the app or CLI ("in scope") | **27** (8 still User-API) |
-| Genuine REST gaps blocking a REST-only integration | **3** — all AML screening |
+| Genuine REST gaps blocking a REST-only integration | **3** — all AML screening (now *present but broken*, see §0) |
 | Previously-reported gaps now **closed** | **1** (enrichment signal — no work needed) |
 
-**Verdict:** the onboarding flow is REST-complete **except for the AML screening lifecycle**, which is
-*entirely* absent from REST — trigger, results, and decision. The enrichment gap is closed today.
+**Verdict:** the onboarding flow is REST-complete **except for the AML screening lifecycle**. As of 2026-07-21
+the trigger/decision endpoints **exist** in REST on the editor host (§0) but **return 400 and commit
+nothing**, and the results reads stay empty — so screening is still not REST-usable end to end. The
+enrichment gap is closed today.
 
 ---
 
@@ -34,10 +77,11 @@ the API populates it (see G3).
 
 | # | Capability | REST today | Verdict |
 |---|---|---|:--:|
-| **G1** | **Trigger an AML scan** | Silently accepts and does nothing — see evidence | ❌ **REQUIRED** |
-| **G2** | **Write a match decision** | No endpoint; `patchCustomer` takes only `riskSummary`/`amlProfile` | ❌ **REQUIRED** |
-| **G3** | **Read screening results** | `ScreeningProfile` schema exists but returns **`{}`** post-screening | ❌ **REQUIRED** (worse than documented) |
+| **G1** | **Trigger an AML scan** | Endpoint NOW EXISTS (`scanCustomer`/`scanCustomerContact`, `POST …/screening/scan`) but returns **400 "Input data is corrupted"** and commits nothing — see §0/§G1 | 🟡 **PARTIAL** (was ❌) |
+| **G2** | **Write a match decision** | Endpoint NOW EXISTS (`scanCustomerDetails`, `POST …/screening/details`) but **400**s, rejecting the documented body (§0) | 🟡 **PARTIAL** (was ❌) |
+| **G3** | **Read screening results** | `ScreeningProfile` still returns **`{}`** post-scan; `getOrganizationScreenings` returns 0 rows; scan-response would carry it but no 2xx is reachable | ❌ **STILL OPEN** |
 | **G4** | **Enrichment-completion signal** | `getWorkflowStatus.isFullyInitialized` **works** | ✅ **CLOSED — no work needed** |
+| **Mon** | **Screening monitoring toggle** | `updateCustomer[Contact]ScreeningMonitoring` (`PUT …/screening/monitor`) → **200** (toggle only, not a trigger) | ✅ works |
 
 ### G4 — closed. Evidence
 
@@ -134,7 +178,7 @@ Legend: ✅ REST twin exists & in use · 🟡 twin exists, not used · ⚠️ pa
 | **Screening trigger** | `run_screening`, `scan_contact`, `scan_entity` | ❌ **G1** |
 | **Screening decision** | `set_contact_match_status`, `mark_contact_match`, `mark_no_match`, `mark_entity_no_match`, `save_aml_review` | ❌ **G2** |
 | **Screening read** | `get_screening_matches`, `get_aml_match_details`, `_risk_records` | ❌ **G3** |
-| **Relations / KYC graph** | `list_relations`, `add_contact_relation`, `delete_relation` | ⚠️ **Re-examine** — `CreateContactRequest` declares a `relations` property and `getRelationTypes`/`getRelationCategories` exist, so REST may model this better than "shape differs" implies. Not a blocker. → **S3** |
+| **Relations / KYC graph** | `list_relations`, `add_contact_relation`, `delete_relation` | ✅ **CLOSED (2026-07-21)** — `addCustomerContactRelation` (`PUT …/contacts/{id}/relations`) + `deleteCustomerContactRelation` (`DELETE …/contacts/{id}/relations/{code}`) live-verified additive (201/200, no clobber); graph via `getCustomerStructureChart` (`GET …/structure-chart`, 200). See §0. → **S3 done** |
 | **ID-document upload** | `upload_id_document` — `PATCH /api/client/onboarding/documents/identity`, **process-token auth** (only such site) | ❌ REST uploads exist but not the `contactId`+`idDocType` identity binding. Unlisted in prior docs; not reached by app/CLI. → **S2** |
 | **Process/task lifecycle** | `complete_task`, `close_process`, `list_customer_processes` | ⚠️ covered by `action=COMPLETE` + `closeProcessById`; note `force_close_process` uses `?force=true`, which auto-submits open steps — not identical semantics |
 | **Workspace config** | `get_workspace_settings`, `update_workspace_settings`, `get_workspace_members` | ⚠️ `getUsers`/`getLegalTypes` cover members+types; **settings** map only to `getWorkspaceFeatures` (feature flags ≠ all settings) |
@@ -148,15 +192,18 @@ Super-user/ops only: `ci_enrichment`, `heartbeat_logs`, `heartbeat_alerts`, `get
 
 ## 4. What blocks a REST-only integration
 
-The app (`app.py`) touches the User API in exactly **two** places:
+The app (`app.py`) touches the User API in exactly **two** places — **both now closable on the editor host
+with no vendor work**:
 
-1. `/api/create-matter` → `wait_enrichment` — **closable today via G4, no vendor work.**
-2. `/api/contacts`, `/api/contact-add-relation`, `/api/contact-delete-relation` → relations tab (S3).
+1. `/api/create-matter` → `wait_enrichment` — **closable today via G4** (`getWorkflowStatus`).
+2. `/api/contacts`, `/api/contact-add-relation`, `/api/contact-delete-relation` → relations tab —
+   **closable today via S3** (`addCustomerContactRelation` / `deleteCustomerContactRelation`, live-verified §0).
 
 The app **never** screens. Screening is **CLI-only** (`reference_flow.py` steps 4/5/6/9).
 
-**So: G1 + G2 + G3 are the entire vendor ask.** Ship those and the guide drops the email+password
-credential. Detailed specs: **`REST_GAPS_BACKEND.md`**.
+**So the app itself can go REST-only today.** The remaining vendor ask is screening: **fix G1 (scan commit)
+and G2 (decision), and populate G3a** — the reads (G3b candidates, G3c detail) already have REST twins that
+light up the moment a scan commits. Detailed specs: **`REST_GAPS_BACKEND.md`**.
 
 ---
 

@@ -1,14 +1,25 @@
 # REST gaps to close — backend work items
 
-**For:** BetterCo backend · **From:** integration-guide audit, 2026-07-17
-**Basis:** public spec `betterco_api.yaml` (178 ops, v2.0.0) + live probes on `editor.betterco.ai`
-**Full audit:** `REST_GAP_AUDIT.md`
+**For:** BetterCo backend · **From:** integration-guide audit, 2026-07-17 · **Updated:** 2026-07-21
+**Basis:** public spec `betterco_api.yaml` (178 ops, v2.0.0) + editor host spec (**204 ops**) + live probes on `editor.betterco.ai`
+**Full audit:** `REST_GAP_AUDIT.md` · **Re-check:** `python tests_rest_gaps.py`
 
 **Goal:** let a partner run the whole KYC onboarding flow on the **REST key+secret token alone** and retire
 the internal User API (email+password).
 
-**Everything blocking that is AML screening.** Trigger, results, and decision are absent from REST. Nothing
-else in the flow needs work — the previously-reported enrichment gap is **already closed** (see §0).
+**Everything blocking that is AML screening.** As of **2026-07-21** the screening endpoints are no longer
+absent — the editor host now carries 8 screening ops under the **`Customers`** tag (1:1 REST twins of the
+internal `/api/…/screening/*` routes; **not yet on `app.betterco.ai`**). **But live-probed they don't work:**
+`POST …/screening/scan` returns 400 "Input data is corrupted" (the provider search fires, but nothing
+commits); `POST …/screening/details` rejects the decision body (400 "Invalid fields: ['attributes',…]"); and
+`getCustomerById.screeningProfile` / `getOrganizationScreenings` stay empty post-scan. **So the ask below
+flips from "build" to "fix the shipped endpoints."** The enrichment gap is separately closed (see §0).
+
+> **What changed vs the 2026-07-17 spec.** This memo originally proposed brand-new `POST …/screenings`
+> routes. BetterCo instead shipped the internal route shape verbatim (`…/screening/scan`,
+> `…/screening/details`, `…/screening/monitor`, `…/screening/certificate`). The proposals below are kept for
+> the *contract* (async, scope, acceptance) but the **path shape is now the shipped one**, and each item is
+> re-scoped to the observed failure.
 
 All paths below are relative to the existing convention:
 `/restapi/v1/workspaces/{workspace_id}/organizations/{org_id}/…`, `Authorization: Bearer <api-key token>`.
@@ -21,16 +32,17 @@ All paths below are relative to the existing convention:
 |---|---|---|---|---|
 | **B0** | `updateProcessFullData` silently 200s on screening fields | **Bug** | **P0** | XS |
 | **G3a** | Populate the existing `ScreeningProfile` on `Actor`/`Contact` | Fix impl. to match spec | **P0** | S |
-| **G1** | `POST …/screenings` — run a scan | New endpoint | **P0** | M |
-| **G3b** | Read match candidates | New endpoint *or* schema field | **P1** | M |
-| **G2** | `PATCH …/screenings/{id}` — record a decision | New endpoint | **P1** | M |
-| **G3c** | Candidate detail (Acuris profile) | New endpoint | **P2** | M |
+| **G1** | `POST …/screening/scan` — **commit** instead of 400 "Input data is corrupted" | **Fix shipped endpoint** | **P0** | M |
+| **G3b** | Read match candidates — twin `getCustomerSearchResults` shipped; **404 until G1 commits** | Fix depends on G1 | **P1** | — |
+| **G2** | `POST …/screening/details` — **accept** the decision body (rejects `attributes` today) | **Fix shipped endpoint** | **P1** | M |
+| **G3c** | Candidate detail — twin `getCustomerSearchResultDetails` shipped; same 404-until-G1 | Fix depends on G1 | **P2** | — |
 | **S1** | `LEAD` + document-purchase on `createCustomerFromExternalSource` | Param addition | **P2** | S |
 | **S2** | Identity-document upload with `contactId` + `idDocType` | New endpoint | **P3** | S |
-| **S3** | Confirm contact `relations` read/write parity | Investigation | **P3** | S |
+| **S3** | Contact `relations` read/write — **CLOSED**, shipped & verified | ✅ done | — | — |
 | **S4** | Workspace settings beyond feature flags | Investigation | **P3** | S |
 
-**Minimum to unblock a REST-only integrator: B0 + G3a + G1 + G3b + G2.**
+**Minimum to unblock a REST-only integrator: fix B0 + G1 + G3a + G2.** (G3b/G3c twins are already shipped —
+they return data the moment G1 commits a scan. S3 relations and the enrichment signal are already closed.)
 
 ---
 
@@ -82,33 +94,25 @@ and `contacts` are accepted by validation and dropped by the handler. Note `isRe
 
 ---
 
-## §G1 — Run a screening **[P0]**
+## §G1 — Run a screening **[P0 — now: fix the shipped endpoint]**
 
-**Why:** no way to start an AML/PEP/sanction scan over REST. The existing four screening ops are read +
-monitor-toggle only:
-`getOrganizationScreenings`, `getOrganizationScreeningsSince`, `getOrganizationMonitoredCustomersAndContacts`,
-`putCustomerOrContactOnOffScreeningMonitor`.
+**Status 2026-07-21:** the scan endpoint **now exists** at `POST …/customers/{customer_id}/screening/scan`
+(`scanCustomer`) and `…/contacts/{contact_id}/screening/scan` (`scanCustomerContact`) — but it is a verbatim
+mirror of the broken internal route: it returns **`400 "Input data is corrupted"`**. Probed on a clean PEP
+contact (Olaf Scholz, valid `birthDate`, relation `9010`): the provider search **does fire** — 3 candidates
+are fetched and readable via the internal `search-results` — **but the `screeningProfile` never commits**, so
+`getCustomerById.screeningProfile` stays `{}`. Exactly the behaviour this memo asked you **not** to
+reproduce (below), now reproduced over REST.
 
-**What the guide does today (to be replaced):**
-`PATCH /api/client/onboarding?businessRelationId=&processId=&stepId=P1615_amlScreeningDefinition&roleTypes=PROCESS`
-— entity + all in-scope contacts in one call; and per-contact
-`POST /api/customers/{brId}/contacts/{cid}/screening/scan` (note: this one 400s "Input data is corrupted"
-for most actors — the step-submit is the only reliable trigger. Please don't reproduce that behaviour).
+**The reliable internal trigger has no working REST twin.** Today the guide screens via the P1615 step-submit
+(`PATCH /api/client/onboarding?…&stepId=P1615_amlScreeningDefinition&roleTypes=PROCESS`), whose REST
+equivalent (`updateProcessFullData`) is the **B0 silent no-op**. So neither REST path actually screens.
 
-### Proposed
+### Ask
 
-```http
-POST /restapi/v1/workspaces/{ws}/organizations/{org}/customers/{customer_id}/screenings
-{ "rescreen": true,
-  "roleTypes": ["LEGAL_REP", "UBO", "ACTING_PERSON"] }     # scope: entity + in-scope contacts
-→ 202 { "screeningId": "..." }
-```
-```http
-POST /restapi/v1/workspaces/{ws}/organizations/{org}/customers/{customer_id}/contacts/{contact_id}/screenings
-{ "rescreen": true }
-→ 202 { "screeningId": "..." }
-```
-`operationId`: `runCustomerScreening` / `runContactScreening`
+Make **`POST …/screening/scan` commit** a screening (fetch + persist a `ScreeningProfile`) and return `2xx`
+instead of `400 "Input data is corrupted"`. The shipped path shape is fine — keep it. Contract:
+`operationId`s `scanCustomer` / `scanCustomerContact` (already published).
 
 **Requirements**
 - **Async.** Return `202` immediately; the provider scan is slow (the internal path needs a 120 s timeout on
@@ -157,9 +161,16 @@ poll-until-populated (step 5) and per-actor verdict resolution (steps 6/9) REST-
 **Acceptance:** post-scan, `getCustomerById` returns non-empty `screeningProfile` with at minimum
 `lastScreeningDate`, `matchStatus`, `totalHits`, `totalMatches`, `searchId`.
 
-### §G3b — Match candidates **[P1]**
+### §G3b — Match candidates **[P1 — twin shipped, needs data]**
 
 Needed to *adjudicate* — a human must see who matched before recording a decision (G2).
+
+**Status 2026-07-21:** the REST twin **now exists** — `getCustomerSearchResults`
+(`GET …/customers/{customer_id}/search-results`) and `getCustomerContactSearchResults`
+(`…/contacts/{contact_id}/search-results`), both `Customers`-tagged, 1:1 with the internal route below.
+Probed: `OPTIONS 200`, but `GET 404` because **no scan has committed** (blocked entirely by G1). So there is
+no new endpoint to build here — **fixing G1 lights this up.** `getCustomer[Contact]SearchResultDetails`
+(`…/search-results/{search_id}`) is the shipped **G3c** detail twin, same state.
 
 **Internal today:** `GET /api/customers/{brId}/search-results[?contactId=]`
 
@@ -205,12 +216,22 @@ cases; this is the drill-down.
 
 ---
 
-## §G2 — Record a screening decision **[P1]**
+## §G2 — Record a screening decision **[P1 — now: fix the shipped endpoint]**
 
-**Why:** no REST way to adjudicate a match. `patchCustomer` accepts only
+**Status 2026-07-21:** the decision-write twin **now exists** — `scanCustomerDetails`
+(`POST …/customers/{customer_id}/screening/details`) and `scanCustomerContactDetails`
+(`…/contacts/{contact_id}/screening/details`), `Customers`-tagged, mirroring the internal `…/screening/details`
+route. **But it rejects the write:** a `null` body → `400 "Input data is corrupted"`; a candidate body →
+`400 "Cannot read JSON. Invalid fields: ['attributes','gender']"` — i.e. it **rejects the very
+`SearchResponseData.attributes` field the spec declares** as the request schema. So the route is there; the
+request contract is broken. **Fix:** accept the published `SearchResponseData` (or document the real accepted
+shape) and persist the decision as `matchStatus` visible through G3a. The proposal below still states the
+desired contract.
+
+**Why it matters:** without a working decision write, `aggregatedAmlRisk` is stuck at `UNKNOWN` forever
+(see G3a) and the KYC file can't be closed. `patchCustomer` is no substitute — it accepts only
 `riskSummary` / `amlProfile` (`UpdateActorRequest`), and `updateProcessFullData`'s `FullData.riskProfile`
-declares only `kycNote` / `aggregatedAmlRisk` / `amlRiskRelevant` — no `matchStatus` write anywhere.
-Without this, `aggregatedAmlRisk` is stuck at `UNKNOWN` forever (see G3a) and the KYC file can't be closed.
+declares only `kycNote` / `aggregatedAmlRisk` / `amlRiskRelevant` — no `matchStatus` write.
 
 **Internal today:** `PATCH /api/contacts/{cid}/screening?companyId={entity_actorId}` `{matchStatus}` /
 `{riskLevel}`; `POST /api/customers/{brId}[/contacts/{cid}]/screening/details` (body literally `null`) to
@@ -258,13 +279,14 @@ documents at creation. REST `createCustomerFromExternalSource` has neither, so t
 **Ask:** `POST …/customers/{customer_id}/contacts/{contact_id}/documents/identity` (multipart, `idDocType`).
 Not reached by app/CLI today — low priority, but it's the last process-token dependency.
 
-### §S3 — Contact `relations` parity **[P3 — investigation]**
-The guide's relations tab uses `/api/relations` (`GET`/`PUT`/`DELETE`, keyed by `companyId` = entity
-actorId). Prior docs call REST a "rework, shape differs" — but `CreateContactRequest` **declares a
-`relations` property**, and `getRelationTypes` / `getRelationCategories` exist.
-**Ask:** confirm whether `addCustomerContact`/`updateCustomerContact` + `deleteCustomerContact` can
-add/remove a single relation code (e.g. `9010`) on an existing contact without clobbering the others. If
-yes → no backend work, guide-side rework only. If no → a relation-level sub-resource is the gap.
+### §S3 — Contact `relations` parity **[CLOSED 2026-07-21 — no backend work]**
+The editor host ships a relation-level sub-resource under the `Customers` tag:
+`addCustomerContactRelation` (`PUT …/customers/{id}/contacts/{cid}/relations` `{relationIds:[…]}`) and
+`deleteCustomerContactRelation` (`DELETE …/customers/{id}/contacts/{cid}/relations/{relation_id}`).
+**Live-verified:** `PUT {relationIds:['9060']}` → `201` and the response shows `9060` **added alongside** the
+existing `9010` (additive, no clobber); `DELETE …/relations/9060` → `200`. The KYC graph reads via
+`getCustomerStructureChart` (`GET …/structure-chart` → `200`). **Guide-side rework only** — this retires the
+app's `/api/relations` dependency (the relations tab).
 
 ### §S4 — Workspace settings **[P3 — investigation]**
 `get/update_workspace_settings` (`/api/workspaces/{ws}/settings`, flat `{key: "true"|"false"}`) maps only to

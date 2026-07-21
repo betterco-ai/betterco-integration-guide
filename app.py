@@ -1168,10 +1168,10 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             with _client_lock:
-                # PENDING REST: relations graph is User-API only. REST models this
-                # as customer contacts (getCustomerContacts) but the shape differs
-                # (⚠️ partial in REST_MAPPING.md §1 row 16) — kept on User-API until
-                # the contacts REST model is reconciled ("wait for others to evolve").
+                # REST-first on editor/dev (getCustomerContacts + per-contact
+                # relations[]), automatic /api/relations fallback on STG/APP where
+                # the relation sub-resource isn't shipped yet — the client routes
+                # this internally (see betterco_client.list_relations).
                 raw = _client.list_relations(cid)
 
             logging.getLogger("betterco").info(
@@ -1269,7 +1269,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"error": "cid, contactId und mind. eine Rolle erforderlich"}, 400)
         try:
             with _client_lock:
-                # PENDING REST: relations write is User-API only (see list_relations note).
+                # REST (addCustomerContactRelation) on editor/dev, /api/relations
+                # fallback on STG/APP — routed inside the client.
                 results = [_client.add_contact_relation(cid, contact_id, c) for c in codes]
             return self._send_json({"ok": True, "added": len(results), "results": results})
         except Exception as exc:  # noqa: BLE001

@@ -1,8 +1,41 @@
 # Memo — REST-Lücken-Audit, Stand und nächste Schritte
 
-**Datum:** 2026-07-17 · **Ticket:** [BCP-8213](https://leanmarks.atlassian.net/browse/BCP-8213)
+**Datum:** 2026-07-17 · **Aktualisiert:** 2026-07-21 · **Ticket:** [BCP-8213](https://leanmarks.atlassian.net/browse/BCP-8213)
 **Grundlage:** `REST_GAP_AUDIT.md` (Belege), `REST_GAPS_BACKEND.md` (Entwickler-Spezifikation)
 **Nachprüfung:** `tests_rest_gaps.py` (ein Befehl, siehe unten)
+
+---
+
+## Update 2026-07-21 — Screening-Endpoints sind jetzt in REST vorhanden (auf dem Editor-Host)
+
+BetterCo hat **auf `editor.betterco.ai`** (Spec jetzt **204 Operationen**, vs. 178 auf `app.betterco.ai`)
+eine ganze Familie Screening-Operationen unter dem Tag **`Customers`** ausgeliefert — **1:1-Twins der
+internen `/api/…/screening/*`-Routen**. Genau „mirrors of existing screening apis". **Aber live geprobt
+funktionieren sie noch nicht** — der Spiegel ist inklusive der internen Bugs getreu:
+
+- **G1 Scan** (`POST …/screening/scan`, Entity + Contact): **HTTP 400 „Input data is corrupted"**. Die
+  Provider-Suche feuert (Kandidaten werden geholt — 3 Treffer für Olaf Scholz), aber das `screeningProfile`
+  wird **nicht committet**. Zuverlässiger Trigger (P1615-Step-Submit) hat weiterhin keinen funktionierenden
+  REST-Twin (= B0).
+- **G2 Entscheidung** (`POST …/screening/details`): **400** — lehnt den dokumentierten `SearchResponseData`-
+  Body ab („Invalid fields: ['attributes','gender']").
+- **G3 Lesen**: `getCustomerById.screeningProfile` weiter `{}`; `getOrganizationScreenings` = 0 Zeilen.
+- **Monitor** (`PUT …/screening/monitor`): **200** (nur Umschalter). **Zertifikat** (`GET …/screening/certificate`): routet (404 bis vorhanden).
+
+**Zusätzlich sind die abhängigen Read-Twins und die Beziehungen jetzt in REST da** (alle `Customers`-Tag,
+editor-only, teils live verifiziert):
+
+- **Kandidaten-Read (G3b)** `getCustomerSearchResults` + **Detail (G3c)** `getCustomerSearchResultDetails` —
+  Route vorhanden (`OPTIONS 200`), `GET 404` nur mangels committetem Scan → **wird durch G1-Fix automatisch
+  aktiv**.
+- **Beziehungen (S3) = GESCHLOSSEN**: `addCustomerContactRelation` (`PUT …/contacts/{id}/relations`) +
+  `deleteCustomerContactRelation` (`DELETE …/relations/{code}`) — live verifiziert (201/200, additiv, kein
+  Überschreiben). Graph via `getCustomerStructureChart` (`GET …/structure-chart` → 200).
+
+**Neues Gesamtbild:** Der Blocker für eine REST-only-Integration schrumpft von „gesamter Screening-
+Lebenszyklus" auf **einen funktionalen Defekt — der Scan committet nicht (G1)** — plus dessen Entscheidungs-
+Sibling (G2). Die **App selbst** kann **heute** REST-only laufen (G4 Anreicherung + S3 Beziehungen beide
+geschlossen). Der Vendor-Ask wechselt von „diese Endpoints bauen" zu **„die gerade ausgelieferten fixen"**.
 
 ---
 

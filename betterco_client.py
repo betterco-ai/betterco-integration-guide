@@ -56,6 +56,10 @@ class BetterCoClient:
         self._org = f"/restapi/v1/workspaces/{self.workspace_id}/organizations/{self.org_id}"
         self.token = None
         self.token_expiry = 0
+        # Capability cache for the contact-relation REST sub-resource, which ships
+        # on editor/dev but not yet on STG/APP (feature-probed once, see
+        # _rest_relations_supported). None = not yet probed.
+        self._rest_relations = None
         self.session = requests.Session()
         self.session.verify = os.getenv("BETTERCO_SSL_VERIFY", "true").lower() not in ("false", "0", "no")
         self._configure_session()
@@ -417,7 +421,93 @@ class BetterCoClient:
         r.raise_for_status()
         return r.json()
 
+    # ── Relations (KYC contacts) — REST twin on editor/dev, User-API fallback ──
+    #
+    # The contact-relation sub-resource (addCustomerContactRelation /
+    # deleteCustomerContactRelation, PUT/DELETE .../contacts/{id}/relations) ships
+    # on editor + dev but NOT yet on STG/APP. All three ops (list/add/delete) route
+    # through REST when the sub-resource is present, else fall back to the internal
+    # /api/relations User-API — so the same code works on every environment and
+    # auto-upgrades to REST as STG/APP catch up. The REST list encodes each
+    # relationId as "contactId::code" so delete_relation round-trips without a
+    # separate capability check; a plain record id means User-API.
+
+    def _rest_relations_supported(self, cid: str) -> bool:
+        """Feature-detect the relation sub-resource (cached per client). OPTIONS
+        resolves on the path template even for a non-existent contact id, so no
+        real contact is needed; STG/APP (endpoint absent) return 404 → User-API."""
+        if self._rest_relations is None:
+            try:
+                r = self.session.options(self._url(
+                    f"/customers/{cid}/contacts/000000000000000000000000/relations"))
+                self._rest_relations = (r.status_code < 400
+                                        and "PUT" in (r.headers.get("Allow", "")))
+                log.info("REST relation sub-resource %s on %s",
+                         "present" if self._rest_relations else "absent", self.base_url)
+            except Exception as exc:  # noqa: BLE001 — any probe failure ⇒ safe fallback
+                log.warning("relation capability probe failed (%s); using User API", exc)
+                self._rest_relations = False
+        return self._rest_relations
+
+    def add_contact_relation_rest(self, cid: str, contact_id: str, relation_code: str) -> dict:
+        """PUT .../customers/{cid}/contacts/{contact_id}/relations {relationIds:[code]}
+        (addCustomerContactRelation). Additive — keeps the contact's other codes."""
+        self._ensure_auth()
+        r = self.session.put(
+            self._url(f"/customers/{cid}/contacts/{contact_id}/relations"),
+            json={"relationIds": [relation_code]})
+        if r.status_code >= 400:
+            log.error("add_contact_relation_rest failed (%d): %s", r.status_code, r.text[:300])
+        r.raise_for_status()
+        return r.json() if r.text else {}
+
+    def delete_contact_relation_rest(self, cid: str, contact_id: str, relation_code: str) -> int:
+        """DELETE .../contacts/{contact_id}/relations/{relation_code}
+        (deleteCustomerContactRelation). A 404 (already absent) is treated as success."""
+        self._ensure_auth()
+        r = self.session.delete(self._url(
+            f"/customers/{cid}/contacts/{contact_id}/relations/{relation_code}"))
+        if r.status_code >= 400 and r.status_code != 404:
+            log.error("delete_contact_relation_rest failed (%d): %s", r.status_code, r.text[:300])
+            r.raise_for_status()
+        return r.status_code
+
+    def list_relations_rest(self, cid: str) -> list:
+        """KYC relations list built from REST reads (getCustomerContacts +
+        per-contact getCustomerContactDetails.relations[]). Returns rows shaped
+        like the User-API list so callers are unchanged, with a composite
+        id 'contactId::code' the REST delete round-trips."""
+        self._ensure_auth()
+        rows = []
+        for ct in (self.list_contacts(cid) or []):
+            contact_id = ct.get("id")
+            if not contact_id:
+                continue
+            name = (ct.get("displayName") or ct.get("contactName") or "").strip()
+            det = self.session.get(self._url(f"/customers/{cid}/contacts/{contact_id}"))
+            if not (det.ok and det.text):
+                continue
+            for rel in (det.json().get("relations") or []):
+                code = str((rel.get("type") or {}).get("id") or "")
+                if not code:
+                    continue
+                rows.append({
+                    "id": f"{contact_id}::{code}",
+                    "contactId": contact_id,
+                    "contactName": name,
+                    "relationType": code,
+                    "status": rel.get("status"),
+                })
+        return rows
+
     def list_relations(self, cid: str) -> list:
+        """List active relations. REST (getCustomerContacts + details) on
+        editor/dev; internal /api/relations elsewhere."""
+        if self._rest_relations_supported(cid):
+            return self.list_relations_rest(cid)
+        return self._list_relations_userapi(cid)
+
+    def _list_relations_userapi(self, cid: str) -> list:
         """List all active relations for a customer via GET /api/relations (KYC contacts view)."""
         company_id = self.get_entity_actor_id(cid)
         params = {
@@ -454,7 +544,16 @@ class BetterCoClient:
         return data if isinstance(data, list) else []
 
     def delete_relation(self, relation_id: str, cid: str) -> int:
-        """Delete a relation by ID via DELETE /api/relations/{id}."""
+        """Delete a relation. A composite id 'contactId::code' (produced by the
+        REST list) deletes via the REST sub-resource; a plain record id deletes
+        via the internal /api/relations/{id}."""
+        if "::" in (relation_id or ""):
+            contact_id, code = relation_id.split("::", 1)
+            return self.delete_contact_relation_rest(cid, contact_id, code)
+        return self._delete_relation_userapi(relation_id, cid)
+
+    def _delete_relation_userapi(self, relation_id: str, cid: str) -> int:
+        """Delete a relation by record ID via DELETE /api/relations/{id}."""
         company_id = self.get_entity_actor_id(cid)
         r = requests.delete(
             f"{self.base_url}/api/relations/{relation_id}",
@@ -468,6 +567,13 @@ class BetterCoClient:
         return r.status_code
 
     def add_contact_relation(self, cid: str, contact_id: str, relation_code: str) -> dict:
+        """Add one role to a contact. REST (addCustomerContactRelation) on
+        editor/dev; internal /api/relations elsewhere."""
+        if self._rest_relations_supported(cid):
+            return self.add_contact_relation_rest(cid, contact_id, relation_code)
+        return self._add_contact_relation_userapi(cid, contact_id, relation_code)
+
+    def _add_contact_relation_userapi(self, cid: str, contact_id: str, relation_code: str) -> dict:
         company_id = self.get_entity_actor_id(cid)
         body = {
             "contactId": contact_id,
