@@ -1,8 +1,46 @@
 # REST Gap Audit — every API call in the integration guide
 
-**Date:** 2026-07-17 · **Updated:** 2026-07-21 (editor screening endpoints — see §0) · **Scope:** `betterco_client.py`, `app.py`, `reference_flow.py`
-**Checked against:** live public OpenAPI spec `app.betterco.ai/bcapi/betterco_api.yaml` (parsed, **178 operations**, `info.version: 2.0.0`) — **and** the editor host spec `editor.betterco.ai/bcapi/betterco_api.yaml` (**204 operations**), which as of 2026-07-21 carries 8 screening ops the public spec does not
+**Date:** 2026-07-17 · **Updated:** 2026-07-22 (12 more editor-only ops probed — see §0a) · **Scope:** `betterco_client.py`, `app.py`, `reference_flow.py`
+**Checked against:** live public OpenAPI spec `app.betterco.ai/bcapi/betterco_api.yaml` (parsed, **179 operations**, `info.version: 2.0.0`) — **and** the editor host spec `editor.betterco.ai/bcapi/betterco_api.yaml` (**207 operations**, identical to `dev.betterco.ai`), which carries **28 ops the public spec does not**
 **Verified against:** live `editor.betterco.ai` sandbox (each probe run creates and deletes one customer)
+
+> ## §0a — UPDATE 2026-07-22: the reads all work, and the decision write is CLOSED
+>
+> The editor spec grew again (204 → **207 ops**; app: 178 → 179). Twelve editor-only ops had never been
+> probed. Probing them flips the picture: **everything that reads screening data works**, and the missing
+> **decision write turned up as `PATCH …/screening/profile`**. Harness verdict: **8/11 closed**
+> (`python tests_rest_gaps.py`).
+>
+> | Op (editor-only) | Path | Live behaviour (probed 2026-07-22) |
+> |---|---|---|
+> | `updateCustomer[Contact]ScreeningProfile` | `PATCH …/screening/profile` | **200 — WORKS AND PERSISTS.** Body `{matchStatus, riskLevel, amlNote}`. True PATCH merge (omitted fields untouched), response echoes the *merged* profile. Verified entity + contact, pre- and post-scan, both write orders, read back via `getCustomerById` **and** User-API full-data. **This is the G2 decision write — `…/screening/details` never was.** |
+> | `getCustomer[Contact]SearchResults` | `GET …/search-results` | **200 + full candidates** once a scan exists (1 entity / 3 contact). Attributes: `match, name, score, monitoringID, version, countries, datasets, gender, pepTier, profileImage, datesOfBirth`. The 404 seen on 2026-07-21 was "no scan yet", not a defect. **G3b CLOSED.** |
+> | `getCustomer[Contact]SearchResultDetails` | `GET …/search-results/{id}` | **200 + the provider dossier** (addresses, aliases, businessLinks, evidences, datasets…). ⚠️ `{id}` is the **candidate id** from `searchResults.data[].id` (opaque base64), *not* a search/scan id. **G3c CLOSED.** |
+> | `getCustomer[Contact]PoliticalFunctions` | `GET …/political-functions?search_id=` | **200 + PEP offices** `{current[], former[]}` (Scholz: 2 current / 10 former). |
+> | `getCustomer[Contact]Remarks` | `GET …/remarks?search_id=` | **200 + risk remarks** — e.g. `["PEP Tier 1", "Financial Crime and Fraud - Tax Offences"]`. |
+> | `getCustomerReport` | `GET …/reports?process_name=` | **200 — the rendered summary PDF** `{fileName, mimeType, contentBase64}` (~45 kB). `process_name` is **required** (400 without it); works for `F1600_RiskAMLScreening` and `F1800_OnboardingEntity_A`. |
+> | `uploadCustomerContactIdentityDocument` | `PUT …/contacts/{ct}/identity-documents` | **201** — multipart `file` + `idDocType` + `processId`. |
+> | `getCustomerContactIdentityDocuments` | `GET …/contacts/{ct}/identity-documents` | **200** — lists docs with `contentBase64` inline. Round trip verified. |
+> | `listDocumentSearchJurisdictionCoverage` | `GET …/document-search/jurisdictions/coverage` | **200** — coverage per jurisdiction (registries, SLA, data fields). |
+> | `getDocumentSearchJurisdictionCoverage` | `GET …/document-search/jurisdictions/{code}/coverage` | **200** — e.g. `DE`: SLA 25 min, Hybrid registry. |
+> | `getCustomer[Contact]CompanyInfoAml` | `GET …/aml` | **404 "No AML info found"** — still fed only by `…/screening/details`, which still 400s. |
+>
+> **⚠️ `search_id` is a misnomer.** `…/political-functions` and `…/remarks` expect the **candidate id**
+> (`searchResults.data[].id`). Without the parameter they return `{}` / `[]` with **HTTP 200** — which reads
+> exactly like "this customer has no PEP data" and is the easiest way to wrongly declare the gap open.
+>
+> **Still broken (the whole remaining vendor ask, 4 items):**
+> 1. `scanCustomer` / `scanCustomerContact` → **400 "Input data is corrupted"** (entity *and* a clean PEP
+>    individual with valid `birthDate`). No working REST scan trigger; `run_screening` (User API, step
+>    P1615) remains the only one.
+> 2. `scanCustomer[Contact]Details` → **400 for every body shape**, including the **verbatim candidate
+>    object** returned by `…/search-results`, its slimmed variant, and `{id, type}` alone.
+> 3. `getCustomerById.riskProfile.screeningProfile` carries the **verdict** (`matchStatus`/`riskLevel`) but
+>    never the **scan** side (`lastScreeningDate`, `totalHits`, `searchId`, `hitsPerCategory`) — G3a.
+> 4. `getOrganizationScreenings` returns **`{}` for every customer**, scanned or adjudicated.
+>
+> **Net:** with `PATCH …/screening/profile` wired up (`save_aml_review_rest`), the only thing REST still
+> cannot do is **start a scan** and **pull a candidate dossier into `…/aml`**.
 
 > ## §0 — UPDATE 2026-07-21: the screening endpoints now EXIST in REST (but don't work yet)
 >

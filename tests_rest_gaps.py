@@ -10,33 +10,52 @@ progress on the ticket is provable with one command instead of assumed.
     python tests_rest_gaps.py --env-file workspaces/other.env
 
 Gaps checked (see REST_GAPS_BACKEND.md for the specs):
-  G4   enrichment signal via getWorkflowStatus.isFullyInitialized   [expected CLOSED]
-  B0   full-data PATCH silently 200s on the screening body          [expected OPEN]
-  G1   POST .../screening/scan — run a scan (entity + contact)      [NOW PRESENT, 400s]
+  G4   enrichment signal via getWorkflowStatus.isFullyInitialized   [CLOSED]
+  B0   full-data PATCH silently 200s on the screening body          [OPEN]
+  G1   POST .../screening/scan — run a scan (entity + contact)      [PRESENT, 400s]
   G1m  PUT .../screening/monitor — monitoring toggle                [PRESENT, 200]
-  G3a  ScreeningProfile populated after a scan (per-cust/org/scan)  [expected OPEN]
-  G3b  match candidates via getCustomerSearchResults                [route PRESENT, 404 no-data]
-  G2   POST .../screening/details — record a decision               [NOW PRESENT, 400s]
+  G3a  ScreeningProfile populated (per-customer / org bulk)         [PARTIAL — verdict yes,
+                                                                     scan counters no]
+  G3b  match candidates via getCustomer[Contact]SearchResults       [CLOSED]
+  G3c  candidate dossier via .../search-results/{candidate_id}      [CLOSED]
+  G7   PEP data: .../political-functions + .../remarks              [CLOSED — needs search_id]
+  G5   summary PDF: .../reports?process_name=                       [CLOSED]
+  G6   contact ID docs: PUT/GET .../identity-documents              [CLOSED]
+  G2   decision write: PATCH .../screening/profile                  [CLOSED]
 
-Spec-diff note (editor betterco_api.yaml v2.0.0, 204 ops — vs 178 on
-app.betterco.ai): as of 2026-07-21 a whole family of 8 screening ops appeared
-under the **Customers** tag on the editor host, absent from the public app spec.
-They are 1:1 REST twins of the internal /api/.../screening/* routes:
-  scanCustomer / scanCustomerContact          POST .../screening/scan
-  scanCustomerDetails / ...ContactDetails     POST .../screening/details  (decision)
-  updateCustomer[Contact]ScreeningMonitoring  PUT  .../screening/monitor
-  getCustomer[Contact]ScreeningCertificate    GET  .../screening/certificate
-plus the earlier org-level Screenings tag (getOrganizationScreenings exposes a
-ScreeningProfile.screeningData; putCustomerOrContactOnOffScreeningMonitor).
+Spec-diff note (editor betterco_api.yaml v2.0.0, **207 ops** — vs 179 on
+app.betterco.ai; 28 ops are editor-only). The editor host carries a whole
+**Customers**-tagged family absent from the public app spec — 1:1 REST twins of
+the internal /api/.../screening/* + relations routes:
+  scanCustomer / scanCustomerContact          POST  .../screening/scan
+  scanCustomerDetails / ...ContactDetails     POST  .../screening/details
+  updateCustomer[Contact]ScreeningProfile     PATCH .../screening/profile  (decision)
+  updateCustomer[Contact]ScreeningMonitoring  PUT   .../screening/monitor
+  getCustomer[Contact]ScreeningCertificate    GET   .../screening/certificate
+  getCustomer[Contact]SearchResults[Details]  GET   .../search-results[/{id}]
+  getCustomer[Contact]PoliticalFunctions      GET   .../political-functions
+  getCustomer[Contact]Remarks                 GET   .../remarks
+  getCustomer[Contact]CompanyInfoAml          GET   .../aml
+  getCustomerReport                           GET   .../reports?process_name=
+  get/uploadCustomerContactIdentityDocuments  GET/PUT .../identity-documents
+  add/deleteCustomerContactRelation, getCustomerStructureChart
+  listDocumentSearchJurisdictionCoverage      GET   .../document-search/jurisdictions[/{code}]/coverage
+plus the org-level Screenings tag (getOrganizationScreenings, putCustomerOr
+ContactOnOffScreeningMonitor).
 
-Presence is NOT proof — and live probing (2026-07-21) shows the mirror is
-faithful INCLUDING the internal bugs: scan returns 400 "Input data is corrupted"
-(the provider search fires — candidates get fetched — but the screeningProfile
-never commits), details rejects the decision body (400 "Invalid fields:
-['attributes',...]" — it rejects the very SearchResponseData.attributes the spec
-declares), and getCustomerById.screeningProfile / getOrganizationScreenings stay
-empty for a freshly-scanned customer. Monitor toggles (200); certificate routes
-(404 until one exists). So the ask flips from "build these" to "fix these".
+Presence is NOT proof. Live probing 2026-07-22 (this run supersedes 2026-07-21):
+the READS all work once a scan exists — candidates come back complete (pepTier,
+datesOfBirth, datasets, profileImage), the candidate dossier resolves, PEP
+functions and remarks resolve, the summary PDF renders, ID docs round-trip. What
+is still broken is the SCAN TRIGGER (scanCustomer[Contact] → 400 "Input data is
+corrupted"), the DOSSIER PULL (.../screening/details → 400 for every body shape
+incl. the verbatim candidate object → .../aml stays 404), the ENTITY verdict
+write (PATCH .../screening/profile 200s with an echo and persists nothing) and
+getOrganizationScreenings (always {}). So the ask is "fix 4", not "build".
+
+GOTCHA: .../political-functions and .../remarks take ?search_id=<CANDIDATE id>
+(searchResults.data[].id — an opaque base64 blob), NOT a search/scan id. Without
+it they return {} / [] with HTTP 200, which reads exactly like "no data".
 
 Writes ONE throwaway customer and deletes it in a finally block. Editor
 sandbox only — refuses any prod/afileon env.
@@ -50,6 +69,7 @@ from reference_flow import connect, _as_list
 OPEN, CLOSED, PARTIAL = "\033[31mOPEN\033[0m", "\033[32mCLOSED\033[0m", "\033[33mPARTIAL\033[0m"
 ROLES = ("LEGAL_REP", "UBO", "ACTING_PERSON")
 verdicts = {}
+CAND = {}   # {"entity"|"contact": candidate dict} — filled by G3b, read by G3c/G7
 
 
 def report(gap, state, detail=""):
@@ -220,7 +240,13 @@ def check_g3a(c, cid, scr_pid, **_):
     """Needs a REAL scan first. Triggers via User API (the only working trigger
     today), then asks what REST exposes. CLOSED if ScreeningProfile is populated
     on EITHER the per-customer read (getCustomerById, which returned {} in the
-    audit) or the NEW org-level bulk read (getOrganizationScreenings)."""
+    audit) or the org-level bulk read (getOrganizationScreenings).
+
+    Nuance found 2026-07-22: getCustomerById.screeningProfile is NOT permanently
+    empty — it mirrors the *verdict* (matchStatus/riskLevel) as soon as one is
+    committed via save_aml_review. What it never carries is the *scan* side
+    (lastScreeningDate / totalHits / searchId / hitsPerCategory), which is what
+    this check asks for. getOrganizationScreenings stays {} either way."""
     try:
         c.run_screening(cid, scr_pid)
     except Exception as exc:
@@ -266,18 +292,22 @@ def check_g3b(c, cid, scr_ct=None, **_):
     paths = [("entity", f"/customers/{cid}/search-results")]
     if scr_ct:
         paths.append(("contact", f"/customers/{cid}/contacts/{scr_ct}/search-results"))
-    present, got = False, False
+    present, got, found = False, False, []
     for label, p in paths:
         g = c.session.get(c._url(p))
         if g.ok and g.text:
             data = (g.json() or {}).get("searchResults", {}).get("data") or []
             if data:
-                report("G3b", CLOSED, f"{label} .../search-results -> {len(data)} candidate(s)")
-                return
+                CAND[label] = data[0]          # G3c/G7 read the candidate id from here
+                found.append(f"{label}={len(data)} {sorted(data[0].get('attributes') or {})}")
+                continue
             got = True
         o = c.session.options(c._url(p))
         if o.status_code < 400:
             present = True
+    if found:
+        report("G3b", CLOSED, ".../search-results -> " + "; ".join(found))
+        return
     if got:
         report("G3b", PARTIAL, ".../search-results returned 200 but no candidates")
     elif present:
@@ -314,42 +344,179 @@ def check_g1_monitor(c, cid, **_):
                           f"not a scan trigger)")
 
 
+# -------------------------------------------------------------------------- G3c
+def check_g3c(c, cid, scr_ct=None, **_):
+    """Candidate DETAIL twin: getCustomer[Contact]SearchResultDetails
+    (GET .../search-results/{candidate_id}). The {id} is the CANDIDATE id from
+    G3b's searchResults.data[].id (an opaque base64 blob), NOT a search id.
+    CLOSED if it returns the provider dossier (addresses/datasets/evidences)."""
+    if not CAND:
+        report("G3c", PARTIAL, "no candidate from G3b to resolve — inconclusive")
+        return
+    for label, cand in CAND.items():
+        seg = (f"/customers/{cid}/contacts/{scr_ct}" if label == "contact"
+               else f"/customers/{cid}")
+        r = c.session.get(c._url(f"{seg}/search-results/{cand['id']}"))
+        if r.ok and r.text:
+            d = r.json() or {}
+            report("G3c", CLOSED, f"{label} .../search-results/{{id}} -> {sorted(d)[:8]}")
+            return
+    report("G3c", OPEN, "no candidate detail readable via REST")
+
+
 # --------------------------------------------------------------------------- G2
 def check_g2(c, cid, scr_ct=None, **_):
-    """The decision-write twin NOW EXISTS: POST .../screening/details
-    (scanCustomerDetails / ...ContactDetails). CLOSED if a decision write is
-    accepted (2xx) and reflected as matchStatus; PARTIAL if the endpoint is
-    present but rejects the documented body; OPEN if it 404s. Probes the contact
-    route (uniform with entity). Feeds the spec-typed SearchResponseData shape
-    AND a literal null (the internal no-match marker)."""
-    seg = (f"/customers/{cid}/contacts/{scr_ct}" if scr_ct
-           else f"/customers/{cid}") + "/screening/details"
-    typed = {"id": "probe", "type": "individuals",
-             "attributes": {"match": "NO_MATCH", "name": "probe", "score": "0"}}
-    r = c.session.post(c._url(seg), json=typed)
+    """The DECISION WRITE. Two twins exist; only one works:
+
+    a) PATCH .../screening/profile (updateCustomer[Contact]ScreeningProfile,
+       {matchStatus, riskLevel, amlNote}) — the real adjudication write.
+       Probed 2026-07-22: accepted AND PERSISTED for entity and contact alike,
+       pre- and post-scan, in both write orders; readable back from
+       getCustomerById.riskProfile.screeningProfile and User-API full-data. True
+       PATCH merge — omitted fields survive, the response echoes the merged
+       profile. Enums are narrower than the User API's: NONE/VERY_HIGH (risk) and
+       PARTIAL_MATCH (status) are rejected with 400.
+    b) POST .../screening/details (scanCustomerDetails) — 400 "Input data is
+       corrupted" for every body shape incl. the verbatim candidate object from
+       .../search-results. That route pulls the provider dossier (it feeds
+       .../aml), it is not the decision write.
+
+    CLOSED only when BOTH contact and entity verdicts persist over REST."""
+    typed = {"matchStatus": "FALSE_POSITIVE", "riskLevel": "MEDIUM",
+             "amlNote": "gap-check probe"}
+    notes = []
+
+    ct_ok = None
+    if scr_ct:
+        r = c.session.patch(
+            c._url(f"/customers/{cid}/contacts/{scr_ct}/screening/profile"), json=typed)
+        if r.status_code in (404, 405):
+            notes.append(f"contact PATCH profile: HTTP {r.status_code} (absent)")
+            ct_ok = False
+        elif r.status_code >= 400:
+            notes.append(f"contact PATCH profile: HTTP {r.status_code}")
+            ct_ok = False
+        else:
+            time.sleep(4)
+            sp = _contact_screening_profile(c, cid, scr_ct)
+            if not sp.get("matchStatus"):     # REST read lags; full-data is authoritative
+                fd = c.get_full_data(cid)
+                for x in ((fd.get("contacts") or {}).get("contacts") or []):
+                    if x.get("contactId") == scr_ct:
+                        sp = x.get("screeningProfile") or {}
+            ct_ok = sp.get("matchStatus") == typed["matchStatus"]
+            notes.append(f"contact PATCH profile: HTTP {r.status_code}, "
+                         + ("PERSISTED" if ct_ok else f"NOT persisted ({sp!r})"))
+
+    r = c.session.patch(c._url(f"/customers/{cid}/screening/profile"),
+                        json={"matchStatus": "NO_MATCH", "riskLevel": "LOW",
+                              "amlNote": "gap-check probe"})
+    ent_ok = False
     if r.status_code in (404, 405):
-        report("G2", OPEN, f"POST .../screening/details -> HTTP {r.status_code} "
-                           f"(no decision-write endpoint)")
+        notes.append(f"entity PATCH profile: HTTP {r.status_code} (absent)")
+    elif r.status_code >= 400:
+        notes.append(f"entity PATCH profile: HTTP {r.status_code}")
+    else:
+        time.sleep(4)
+        sp = _screening_profile(c, cid)
+        ent_ok = sp.get("matchStatus") == "NO_MATCH"
+        notes.append(f"entity PATCH profile: HTTP {r.status_code}, "
+                     + ("PERSISTED" if ent_ok else "silent no-op (echo only)"))
+
+    d = c.session.post(c._url((f"/customers/{cid}/contacts/{scr_ct}" if scr_ct
+                               else f"/customers/{cid}") + "/screening/details"),
+                       json=(CAND.get("contact") or CAND.get("entity")
+                             or {"id": "probe", "type": "persons"}))
+    notes.append(f"POST .../screening/details: HTTP {d.status_code}")
+
+    state = CLOSED if (ent_ok and ct_ok) else (PARTIAL if (ent_ok or ct_ok) else OPEN)
+    report("G2", state, "; ".join(notes))
+
+
+# --------------------------------------------------------------------------- G5
+def check_g5_report(c, cid, **_):
+    """NEW twin (never in the app spec): getCustomerReport
+    GET .../customers/{cid}/reports?process_name=<flow> -> {fileName, mimeType,
+    contentBase64} — the rendered summary PDF. process_name is REQUIRED (400
+    without it). CLOSED if a PDF comes back."""
+    r = c.session.get(c._url(f"/customers/{cid}/reports"),
+                      params={"process_name": "F1600_RiskAMLScreening"}, timeout=120)
+    if r.status_code in (404, 405):
+        report("G5", OPEN, f"GET .../reports -> HTTP {r.status_code} (absent)")
         return
-    if r.status_code < 400:
-        report("G2", CLOSED, f"POST .../screening/details accepted a decision (HTTP {r.status_code})")
+    if r.status_code >= 400:
+        report("G5", PARTIAL, f"present but HTTP {r.status_code} {(r.text or '')[:100]}")
         return
-    msg = ""
-    try:
-        msg = (r.json() or {}).get("message", "")
-    except Exception:
-        msg = (r.text or "")[:120]
-    report("G2", PARTIAL, f"present but rejects the documented body: HTTP {r.status_code} "
-                          f"{str(msg)[:100]!r}")
+    d = r.json() or {}
+    n = len(d.get("contentBase64") or "")
+    report("G5", CLOSED if n else PARTIAL,
+           f"{d.get('fileName')!r} {d.get('mimeType')} contentBase64={n} chars")
+
+
+# --------------------------------------------------------------------------- G6
+def check_g6_iddocs(c, cid, scr_ct=None, scr_pid=None, **_):
+    """NEW twins: uploadCustomerContactIdentityDocument (PUT .../contacts/{ct}/
+    identity-documents, multipart file+idDocType+processId) and
+    getCustomerContactIdentityDocuments (GET, returns contentBase64 inline).
+    Retires the User-API identity-document upload. CLOSED if the round trip works."""
+    if not scr_ct:
+        report("G6", PARTIAL, "no contact to upload against")
+        return
+    seg = f"/customers/{cid}/contacts/{scr_ct}/identity-documents"
+    png = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+           b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00"
+           b"\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82")
+    u = c.session.put(c._url(seg), files={"file": ("probe.png", png, "image/png")},
+                      data={"idDocType": "PASSPORT", "processId": scr_pid}, timeout=120)
+    if u.status_code in (404, 405):
+        report("G6", OPEN, f"PUT .../identity-documents -> HTTP {u.status_code} (absent)")
+        return
+    if u.status_code >= 400:
+        report("G6", PARTIAL, f"upload rejected: HTTP {u.status_code} {(u.text or '')[:120]}")
+        return
+    g = c.session.get(c._url(seg))
+    docs = (g.json() if g.ok and g.text else []) or []
+    report("G6", CLOSED if docs else PARTIAL,
+           f"PUT {u.status_code} -> GET lists {len(docs)} doc(s) "
+           f"{[d.get('fileName') for d in docs][:3]}")
+
+
+# --------------------------------------------------------------------------- G7
+def check_g7_pep(c, cid, scr_ct=None, **_):
+    """NEW twins: getCustomer[Contact]PoliticalFunctions (.../political-functions)
+    and getCustomer[Contact]Remarks (.../remarks). GOTCHA: both need
+    ?search_id=<CANDIDATE id from .../search-results>; without it they return
+    {} / [] with HTTP 200 (not an error). CLOSED if the PEP payload comes back."""
+    label = "contact" if ("contact" in CAND and scr_ct) else "entity"
+    cand = CAND.get(label)
+    if not cand:
+        report("G7", PARTIAL, "no candidate id (needs G3b) — cannot query")
+        return
+    seg = (f"/customers/{cid}/contacts/{scr_ct}" if label == "contact"
+           else f"/customers/{cid}")
+    p = c.session.get(c._url(f"{seg}/political-functions"), params={"search_id": cand["id"]})
+    m = c.session.get(c._url(f"{seg}/remarks"), params={"search_id": cand["id"]})
+    if p.status_code in (404, 405) and m.status_code in (404, 405):
+        report("G7", OPEN, "political-functions / remarks absent")
+        return
+    pf = (p.json() if p.ok and p.text else {}) or {}
+    rm = (m.json() if m.ok and m.text else []) or []
+    got = bool(pf.get("current") or pf.get("former") or rm)
+    report("G7", CLOSED if got else PARTIAL,
+           f"{label}: political-functions current={len(pf.get('current') or [])} "
+           f"former={len(pf.get('former') or [])}, remarks={rm[:3]}")
 
 
 CHECKS = {"G4": check_g4, "B0": check_b0, "G1": check_g1, "G1m": check_g1_monitor,
-          "G3a": check_g3a, "G3b": check_g3b, "G2": check_g2}
+          "G3a": check_g3a, "G3b": check_g3b, "G3c": check_g3c, "G7": check_g7_pep,
+          "G2": check_g2, "G5": check_g5_report, "G6": check_g6_iddocs}
 # G1m/G3a must run before G3b (they produce the scan G3b reads) and after B0/G1
 # (which must see an unscreened customer to judge whether THEY triggered it).
 # G1m sits between them: it is itself a candidate trigger, so it must not run
-# before B0/G1 or it would pollute their attribution.
-ORDER = ["G4", "B0", "G1", "G1m", "G3a", "G3b", "G2"]
+# before B0/G1 or it would pollute their attribution. G3c/G7 consume the
+# candidate G3b stashes in CAND, so they follow it. G2 writes a verdict, so it
+# runs last (it would otherwise colour the reads above).
+ORDER = ["G4", "B0", "G1", "G1m", "G3a", "G3b", "G3c", "G7", "G5", "G6", "G2"]
 
 
 def main():

@@ -1,8 +1,57 @@
 # Memo — REST-Lücken-Audit, Stand und nächste Schritte
 
-**Datum:** 2026-07-17 · **Aktualisiert:** 2026-07-21 · **Ticket:** [BCP-8213](https://leanmarks.atlassian.net/browse/BCP-8213)
+**Datum:** 2026-07-17 · **Aktualisiert:** 2026-07-22 · **Ticket:** [BCP-8213](https://leanmarks.atlassian.net/browse/BCP-8213)
 **Grundlage:** `REST_GAP_AUDIT.md` (Belege), `REST_GAPS_BACKEND.md` (Entwickler-Spezifikation)
 **Nachprüfung:** `tests_rest_gaps.py` (ein Befehl, siehe unten)
+
+---
+
+## Update 2026-07-22 — der Entscheidungs-Write ist da, die Lese-Seite funktioniert komplett
+
+Die Editor-Spec ist erneut gewachsen (204 → **207 Operationen**; `app.betterco.ai`: 178 → 179). **28 Ops
+sind editor-only**, davon waren **12 nie geprobt**. Das Ergebnis dreht die Bewertung von gestern:
+
+**Neu geschlossen:**
+
+- **G2 (Entscheidung) — GESCHLOSSEN.** Der gesuchte Write heißt nicht `…/screening/details`, sondern
+  **`PATCH …/screening/profile`** (`updateCustomerScreeningProfile` /
+  `updateCustomerContactScreeningProfile`), Body `{matchStatus, riskLevel, amlNote}`. **200, und der Wert
+  bleibt** — für Entity *und* Kontakt, vor und nach einem Scan, in beiden Schreibreihenfolgen; rücklesbar
+  über `getCustomerById` **und** User-API-`full-data`. Echte PATCH-Semantik (ausgelassene Felder bleiben
+  unverändert), die Antwort spiegelt das **gemergte** Profil. Im Client verdrahtet als
+  `update_screening_profile_rest()` / `save_aml_review_rest()` — ersetzt `save_aml_review` (User API).
+- **G3b (Kandidaten) — GESCHLOSSEN.** `getCustomer[Contact]SearchResults` liefert nach einem Scan die
+  vollständigen Treffer inkl. `pepTier`, `datesOfBirth`, `datasets`, `score`, `profileImage`. Das 404 von
+  gestern war schlicht „noch kein Scan", kein Defekt.
+- **G3c (Kandidaten-Dossier) — GESCHLOSSEN.** `…/search-results/{id}` liefert den Provider-Datensatz
+  (Adressen, Aliase, Beteiligungen, Evidenzen). ⚠️ `{id}` ist die **Kandidaten-ID** aus
+  `searchResults.data[].id`, keine Such-ID.
+- **PEP-Daten in REST:** `…/political-functions` → `{current[], former[]}` (Scholz: 2 aktuell / 10 früher),
+  `…/remarks` → z. B. `["PEP Tier 1", "Financial Crime and Fraud - Tax Offences"]`.
+- **Zusammenfassungs-PDF:** `GET …/reports?process_name=F1600_RiskAMLScreening` → `{fileName, mimeType,
+  contentBase64}` (~45 kB). `process_name` ist **Pflicht** (sonst 400).
+- **Ausweisdokumente (S2) — GESCHLOSSEN.** `PUT …/contacts/{ct}/identity-documents` (multipart `file` +
+  `idDocType` + `processId`) → 201; `GET` listet sie inkl. `contentBase64`.
+- **Jurisdiktions-Abdeckung:** `…/document-search/jurisdictions[/{code}]/coverage` → 200.
+
+**Weiterhin offen — die gesamte verbleibende Bitte an BetterCo, 4 Punkte:**
+
+1. **G1 Scan-Trigger:** `POST …/screening/scan` → weiterhin **400 „Input data is corrupted"** (Entity *und*
+   sauberer PEP-Kontakt mit gültigem `birthDate`). Es gibt **keinen** funktionierenden REST-Trigger;
+   `run_screening` (User API, Step P1615) bleibt der einzige Weg.
+2. **G2b Dossier-Pull:** `POST …/screening/details` → **400 bei jedem Body**, auch beim **wörtlich
+   zurückgegebenen** Kandidaten-Objekt. Dadurch bleibt `GET …/aml` auf 404.
+3. **G3a:** `getCustomerById…screeningProfile` trägt zwar das **Urteil**, aber nie die **Scan-Seite**
+   (`lastScreeningDate`, `totalHits`, `searchId`, `hitsPerCategory`).
+4. **`getOrganizationScreenings`** liefert für jeden Kunden `{}` — gescannt oder beurteilt.
+
+**Zwei Doku-Fehler:** `search_id` erwartet in Wahrheit die Kandidaten-ID (ohne den Parameter kommt
+`{}` / `[]` mit **HTTP 200** zurück — sieht aus wie „keine Daten"); und
+`UpdateScreeningProfileRequest` lehnt `NONE` / `VERY_HIGH` (Risiko) sowie `PARTIAL_MATCH` (Match-Status)
+mit 400 ab, obwohl die User API und `ScreeningProfile` sie kennen.
+
+**Harness-Stand:** `python tests_rest_gaps.py` → **8/11 geschlossen** (neu: G3c, G7, G5, G6; G2 von PARTIAL
+auf CLOSED). Offen: B0, G1 (PARTIAL), G3a.
 
 ---
 

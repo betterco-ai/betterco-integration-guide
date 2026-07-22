@@ -1940,6 +1940,68 @@ class BetterCoClient:
         return self.submit_step(business_relation_id, process_id, step_id, values,
                                 workspace_id=workspace_id)
 
+    # ── AML verdict over REST (retires save_aml_review / set_contact_*) ──────
+
+    def update_screening_profile_rest(self, cid: str, match_status: str = None,
+                                      risk_level: str = None, aml_note: str = None,
+                                      contact_id: str = None) -> dict:
+        """Write an AML verdict over REST — the twin of save_aml_review, no User API.
+
+        PATCH .../customers/{cid}/screening/profile                 (the ENTITY)
+        PATCH .../customers/{cid}/contacts/{ct}/screening/profile   (one contact)
+        = updateCustomerScreeningProfile / updateCustomerContactScreeningProfile
+        (editor spec only — NOT on app.betterco.ai as of 2026-07-22).
+
+        match_status ∈ MATCH | NO_MATCH | FALSE_POSITIVE | POTENTIAL_MATCH | UNKNOWN
+        risk_level   ∈ LOW | MEDIUM | HIGH | UNKNOWN
+        aml_note     free text.
+        The enums are enforced server-side (400 "Cannot read JSON. Invalid fields:
+        ['riskLevel']") and are NARROWER than the User-API ones: NONE and
+        VERY_HIGH are rejected as risk levels, and PARTIAL_MATCH is rejected as a
+        match status even though ScreeningProfile can *return* it. Map before
+        writing if your UI still offers the User-API values.
+
+        PATCH semantics are real: omitted fields are left unchanged, and the
+        response echoes the MERGED profile (not just what you sent). Live-verified
+        2026-07-22 on the editor sandbox — entity and contact, before and after a
+        scan, in both write orders; the verdict is readable back from
+        getCustomerById.riskProfile.screeningProfile AND User-API full-data.
+        Unlike save_aml_review this needs no processId and touches no flow step,
+        so it does NOT advance P1620 — drive the step separately if the flow must
+        progress. Returns the merged ScreeningProfile."""
+        body = {k: v for k, v in (("matchStatus", match_status),
+                                  ("riskLevel", risk_level),
+                                  ("amlNote", aml_note)) if v is not None}
+        if not body:
+            raise ValueError("nothing to update — pass match_status, risk_level or aml_note")
+        seg = f"/customers/{cid}/contacts/{contact_id}" if contact_id else f"/customers/{cid}"
+        r = self.session.patch(self._url(f"{seg}/screening/profile"), json=body, timeout=60)
+        if r.status_code >= 400:
+            log.error("update_screening_profile_rest failed (%d): %s", r.status_code, r.text[:300])
+        r.raise_for_status()
+        return r.json() if r.text else {}
+
+    def save_aml_review_rest(self, cid: str, entity_match_status: str = None,
+                             entity_risk_level: str = None, entity_note: str = None,
+                             contact_verdicts: dict = None) -> dict:
+        """save_aml_review, but REST-only: one PATCH per actor.
+
+        contact_verdicts: {contactId: {"matchStatus":…, "riskLevel":…, "amlNote":…}}.
+        Returns {"entity": profile|None, "contacts": {contactId: profile}}.
+        Each PATCH is independent, so a partial failure leaves the earlier writes
+        committed — read back with get_customer() if that matters."""
+        out = {"entity": None, "contacts": {}}
+        if entity_match_status or entity_risk_level or entity_note:
+            out["entity"] = self.update_screening_profile_rest(
+                cid, entity_match_status, entity_risk_level, entity_note)
+        for ct, v in (contact_verdicts or {}).items():
+            out["contacts"][ct] = self.update_screening_profile_rest(
+                cid, v.get("matchStatus"), v.get("riskLevel"), v.get("amlNote"),
+                contact_id=ct)
+        log.info("save_aml_review_rest %s: entity=%s contacts=%d",
+                 cid, bool(out["entity"]), len(out["contacts"]))
+        return out
+
     # ── Screening review (powers the HTML review app) ───────────────
 
     def find_screening_process(self, business_relation_id: str, workspace_id: str = None) -> str:

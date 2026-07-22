@@ -1,8 +1,17 @@
 # REST gaps to close — backend work items
 
-**For:** BetterCo backend · **From:** integration-guide audit, 2026-07-17 · **Updated:** 2026-07-21
-**Basis:** public spec `betterco_api.yaml` (178 ops, v2.0.0) + editor host spec (**204 ops**) + live probes on `editor.betterco.ai`
+**For:** BetterCo backend · **From:** integration-guide audit, 2026-07-17 · **Updated:** 2026-07-22
+**Basis:** public spec `betterco_api.yaml` (179 ops, v2.0.0) + editor host spec (**207 ops**) + live probes on `editor.betterco.ai`
 **Full audit:** `REST_GAP_AUDIT.md` · **Re-check:** `python tests_rest_gaps.py`
+
+> **UPDATE 2026-07-22 — the ask shrank to 4 items.** Probing the 12 editor-only ops nobody had touched
+> found the decision write hiding under a different name: **`PATCH …/screening/profile`
+> (`updateCustomer[Contact]ScreeningProfile`, `{matchStatus, riskLevel, amlNote}`) works and persists** for
+> entity *and* contact — so **G2 is CLOSED** and `…/screening/details` turns out to be the *dossier pull*,
+> not the decision write. The candidate reads (**G3b**), the candidate dossier (**G3c**), PEP functions and
+> remarks, the summary PDF and contact identity-document upload (**S2**) are all **shipped and working**.
+> What is left: **G1** (scan trigger 400s), **G2b** (`…/screening/details` 400s → `…/aml` stays 404),
+> **G3a** (scan counters never populate) and **G5** (`getOrganizationScreenings` always `{}`).
 
 **Goal:** let a partner run the whole KYC onboarding flow on the **REST key+secret token alone** and retire
 the internal User API (email+password).
@@ -31,18 +40,30 @@ All paths below are relative to the existing convention:
 | ID | Item | Type | Priority | Effort |
 |---|---|---|---|---|
 | **B0** | `updateProcessFullData` silently 200s on screening fields | **Bug** | **P0** | XS |
-| **G3a** | Populate the existing `ScreeningProfile` on `Actor`/`Contact` | Fix impl. to match spec | **P0** | S |
 | **G1** | `POST …/screening/scan` — **commit** instead of 400 "Input data is corrupted" | **Fix shipped endpoint** | **P0** | M |
-| **G3b** | Read match candidates — twin `getCustomerSearchResults` shipped; **404 until G1 commits** | Fix depends on G1 | **P1** | — |
-| **G2** | `POST …/screening/details` — **accept** the decision body (rejects `attributes` today) | **Fix shipped endpoint** | **P1** | M |
-| **G3c** | Candidate detail — twin `getCustomerSearchResultDetails` shipped; same 404-until-G1 | Fix depends on G1 | **P2** | — |
+| **G3a** | Populate the *scan* side of `ScreeningProfile` (`lastScreeningDate`, `totalHits`, `searchId`, `hitsPerCategory`) — the verdict side works | Fix impl. to match spec | **P0** | S |
+| **G2b** | `POST …/screening/details` — 400s for **every** body incl. the verbatim candidate object → `…/aml` stays 404 | **Fix shipped endpoint** | **P1** | M |
+| **G5** | `getOrganizationScreenings` returns `{}` for every customer, scanned or adjudicated | **Bug** | **P2** | S |
+| **G2** | Decision write — **CLOSED 2026-07-22**: `PATCH …/screening/profile` works & persists | ✅ done | — | — |
+| **G3b** | Match candidates — **CLOSED**: `getCustomer[Contact]SearchResults` returns full candidates | ✅ done | — | — |
+| **G3c** | Candidate dossier — **CLOSED**: `…/search-results/{candidate_id}` returns the provider record | ✅ done | — | — |
 | **S1** | `LEAD` + document-purchase on `createCustomerFromExternalSource` | Param addition | **P2** | S |
-| **S2** | Identity-document upload with `contactId` + `idDocType` | New endpoint | **P3** | S |
+| **S2** | Identity-document upload with `contactId` + `idDocType` — **CLOSED**: `PUT …/contacts/{ct}/identity-documents` (multipart `file`+`idDocType`+`processId`) → 201 | ✅ done | — | — |
 | **S3** | Contact `relations` read/write — **CLOSED**, shipped & verified | ✅ done | — | — |
 | **S4** | Workspace settings beyond feature flags | Investigation | **P3** | S |
 
-**Minimum to unblock a REST-only integrator: fix B0 + G1 + G3a + G2.** (G3b/G3c twins are already shipped —
-they return data the moment G1 commits a scan. S3 relations and the enrichment signal are already closed.)
+**Minimum to unblock a REST-only integrator: fix B0 + G1.** Everything else on the critical path now works:
+the decision write (G2), the candidate reads (G3b/G3c), PEP functions/remarks, the summary PDF, identity
+documents (S2), relations (S3) and the enrichment signal are all closed. G3a/G2b/G5 are quality gaps — an
+integrator can ship without them, but has to keep the User API for **starting a scan**.
+
+**Two documentation defects worth fixing while you are in there:**
+- `…/political-functions` and `…/remarks` take `?search_id=`, but the value they actually want is the
+  **candidate id** (`searchResults.data[].id`), not a search id. Omitting it returns `{}` / `[]` with
+  **HTTP 200**, so callers silently conclude "no PEP data".
+- `UpdateScreeningProfileRequest` enforces a **narrower** enum than the User API and than `ScreeningProfile`
+  can return: `NONE` / `VERY_HIGH` (risk) and `PARTIAL_MATCH` (match status) are rejected with
+  400 "Cannot read JSON. Invalid fields: [...]". Either widen it or document the mapping.
 
 ---
 
